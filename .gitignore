@@ -14,6 +14,7 @@ api/**/*.pyc
 api/.venv/
 api/venv/
 tools/modly-cli/__pycache__/
+.hermes-e2e/
 
 # Models (heavy, downloaded at runtime)
 /models/
@@ -33,4 +34,3 @@ Thumbs.db
 # Env
 .env
 .env.local
-

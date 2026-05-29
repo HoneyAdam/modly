@@ -48,11 +48,21 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(payload["model"]["id"], "sf3d")
         self.assertEqual(calls, [("GET", "http://example.test/health"), ("GET", "http://example.test/model/status")])
 
-    def test_params_auto_resolves_model_id(self) -> None:
+    def test_params_auto_uses_validated_active_model_id(self) -> None:
+        calls: list[str] = []
+
         def fake_request(method: str, url: str, *, timeout: float, **_: object) -> object:
+            calls.append(url)
+            if url.endswith("/health"):
+                return {"status": "ok"}
+            if url.endswith("/model/status"):
+                return {"id": "active-photo", "loaded": True}
             if url.endswith("/model/all"):
-                return [{"id": "sf3d/generate", "name": "Generate", "active": False}]
-            if url.endswith("/model/params?model_id=sf3d%2Fgenerate"):
+                return [
+                    {"id": "texture-only/generate", "name": "Misleading Generate Label"},
+                    {"id": "active-photo", "name": "Active Photo Model"},
+                ]
+            if url.endswith("/model/params?model_id=active-photo"):
                 return [{"name": "foreground_ratio"}]
             raise AssertionError(url)
 
@@ -61,20 +71,33 @@ class CommandTests(unittest.TestCase):
         with patch.object(agent, "_request_json", fake_request), redirect_stdout(buf):
             self.assertEqual(agent.cmd_params(args), 0)
         payload = json.loads(buf.getvalue())
-        self.assertEqual(payload["model_id"], "sf3d/generate")
+        self.assertEqual(payload["model_id"], "active-photo")
         self.assertEqual(payload["params"][0]["name"], "foreground_ratio")
+        self.assertEqual(calls[:3], ["http://example.test/health", "http://example.test/model/status", "http://example.test/model/all"])
+
+    def test_explicit_model_id_must_exist_in_model_all(self) -> None:
+        def fake_request(method: str, url: str, *, timeout: float, **_: object) -> object:
+            if url.endswith("/model/all"):
+                return [{"id": "sf3d"}]
+            raise AssertionError(url)
+
+        args = SimpleNamespace(request_timeout=1, model="missing")
+        with patch.object(agent, "_request_json", fake_request):
+            with self.assertRaises(agent.ModlyCliError) as ctx:
+                agent._resolve_model_id(args, "http://example.test")
+        self.assertEqual(ctx.exception.code, "INVALID_MODEL_ID")
 
     def test_export_downloads_workspace_path(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             out = Path(td) / "mesh.glb"
             args = SimpleNamespace(base_url="http://example.test", request_timeout=1, path="Agent/foo.glb", output=str(out), format="glb", compact=True)
-            with patch.object(agent, "_download", return_value=123) as download, redirect_stdout(io.StringIO()) as buf:
+            with patch.object(agent, "_require_health", return_value={"status": "ok"}), patch.object(agent, "_download", return_value=123) as download, redirect_stdout(io.StringIO()) as buf:
                 self.assertEqual(agent.cmd_export(args), 0)
             download.assert_called_once()
             self.assertIn("/export/glb?path=Agent%2Ffoo.glb", download.call_args.args[0])
             self.assertEqual(json.loads(buf.getvalue())["bytes_written"], 123)
 
-    def test_generate_enables_texture_by_default(self) -> None:
+    def test_generate_uses_workflow_run_and_recovery_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             image = Path(td) / "robot.png"
             output = Path(td) / "robot.glb"
@@ -90,29 +113,95 @@ class CommandTests(unittest.TestCase):
                 remesh="quad",
                 enable_texture=True,
                 texture_resolution=1024,
+                texture_model="auto",
+                texture_params_json=None,
+                texture_params_file=None,
+                texture_size=2048,
+                texture_steps=30,
+                texture_guidance=3.0,
                 params_json=None,
                 params_file=None,
                 timeout=10,
                 poll=0,
                 progress=False,
                 quiet=True,
+                no_export=False,
             )
             bodies: list[bytes] = []
 
             def fake_request(method: str, url: str, *, timeout: float, data: bytes | None = None, **_: object) -> object:
-                if url.endswith("/generate/from-image"):
+                if url.endswith("/health"):
+                    return {"status": "ok"}
+                if url.endswith("/model/status"):
+                    return {"id": "sf3d", "loaded": True}
+                if url.endswith("/model/all"):
+                    return [{"id": "sf3d"}]
+                if url.endswith("/workflow-runs/from-image"):
                     self.assertEqual(method, "POST")
                     assert data is not None
                     bodies.append(data)
-                    return {"job_id": "job-1"}
-                if url.endswith("/generate/status/job-1"):
-                    return {"status": "done", "progress": 100, "output_url": "/workspace/Agent/robot.glb"}
+                    return {"run_id": "run-1", "status": "pending"}
+                if url.endswith("/workflow-runs/run-1"):
+                    return {"run_id": "run-1", "status": "done", "progress": 100, "output_url": "/workspace/Default/robot.glb"}
                 raise AssertionError(url)
 
-            with patch.object(agent, "_request_json", fake_request), patch.object(agent, "_export_workspace_path", return_value=456), patch.object(agent, "_texture_model_id", return_value=None):
+            with patch.object(agent, "_request_json", fake_request), patch.object(agent, "_export_workspace_path", return_value=456):
                 result = agent._generate_one(args, image, output)
-            self.assertFalse(result["texture_enabled"])
-            self.assertIn(b'name="enable_texture"\r\n\r\ntrue', bodies[0])
+            self.assertEqual(result["run"], {"kind": "workflowRun", "id": "run-1"})
+            self.assertFalse(result["meta"]["legacy"])
+            self.assertIn("workflow-run status run-1", result["meta"]["status_command"])
+            self.assertEqual(result["workspace_path"], "Default/robot.glb")
+            self.assertIn(b'name="model_id"\r\n\r\nsf3d', bodies[0])
+            self.assertIn(b'"enable_texture":true', bodies[0])
+
+    def test_workflow_run_status_and_cancel_use_canonical_endpoints(self) -> None:
+        calls: list[tuple[str, str]] = []
+
+        def fake_request(method: str, url: str, *, timeout: float, **_: object) -> object:
+            calls.append((method, url))
+            if url.endswith("/health"):
+                return {"status": "ok"}
+            if url.endswith("/workflow-runs/run-1"):
+                return {"run_id": "run-1", "status": "running"}
+            if url.endswith("/workflow-runs/run-1/cancel"):
+                return {"cancelled": True}
+            raise AssertionError(url)
+
+        status_args = SimpleNamespace(base_url="http://example.test", request_timeout=1, run_id="run-1", compact=True)
+        cancel_args = SimpleNamespace(base_url="http://example.test", request_timeout=1, run_id="run-1", compact=True)
+        with patch.object(agent, "_request_json", fake_request), redirect_stdout(io.StringIO()) as buf:
+            self.assertEqual(agent.cmd_workflow_run_status(status_args), 0)
+            self.assertEqual(agent.cmd_workflow_run_cancel(cancel_args), 0)
+        outputs = [json.loads(line) for line in buf.getvalue().splitlines()]
+        self.assertEqual(outputs[0]["run"], {"kind": "workflowRun", "id": "run-1"})
+        self.assertEqual(outputs[1]["cancel"]["cancelled"], True)
+        self.assertIn(("GET", "http://example.test/workflow-runs/run-1"), calls)
+        self.assertIn(("POST", "http://example.test/workflow-runs/run-1/cancel"), calls)
+
+    def test_capability_and_process_fail_closed_when_contract_is_absent(self) -> None:
+        def fake_request(method: str, url: str, *, timeout: float, **_: object) -> object:
+            if url.endswith("/health"):
+                return {"status": "ok"}
+            raise agent.ModlyCliError("missing", code="HTTP_404", http_status=404)
+
+        cap_args = SimpleNamespace(base_url="http://example.test", request_timeout=1, compact=True)
+        proc_args = SimpleNamespace(base_url="http://example.test", request_timeout=1, run_id="run-1", compact=True)
+        with patch.object(agent, "_request_json", fake_request):
+            with self.assertRaises(agent.ModlyCliError) as cap_ctx:
+                agent.cmd_capability_list(cap_args)
+            with self.assertRaises(agent.ModlyCliError) as proc_ctx:
+                agent.cmd_process_run_status(proc_args)
+        self.assertEqual(cap_ctx.exception.code, "UNSUPPORTED_PROCESS")
+        self.assertEqual(proc_ctx.exception.code, "UNSUPPORTED_PROCESS")
+
+    def test_generate_from_workflow_checks_modly_health_before_comfy(self) -> None:
+        args = SimpleNamespace(base_url="http://example.test", request_timeout=1, compact=True, output=None)
+        with patch.object(agent, "_request_json", side_effect=agent.ModlyCliError("down", code="API_UNAVAILABLE")) as request:
+            with patch.object(agent, "_run_comfy_image", side_effect=AssertionError("ComfyUI should not run before Modly health")) as comfy:
+                with self.assertRaises(agent.ModlyCliError):
+                    agent.cmd_generate_from_workflow(args)
+        self.assertEqual(request.call_args.args[:2], ("GET", "http://example.test/health"))
+        comfy.assert_not_called()
 
     def test_batch_processes_images_sequentially(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -255,24 +344,36 @@ class ServeConfigTests(unittest.TestCase):
 
 
 class ParserTests(unittest.TestCase):
-    def test_new_subcommands_parse(self) -> None:
+    def test_canonical_dev_experimental_and_legacy_subcommands_parse(self) -> None:
         parser = agent.build_parser()
         cases = [
             ["status"],
-            ["params"],
-            ["job", "abc"],
-            ["cancel", "abc"],
-            ["comfy-image"],
-            ["generate-from-workflow", "--prompt", "asset", "--output", "asset.glb"],
+            ["model", "list"],
+            ["model", "params"],
+            ["workflow-run", "status", "abc"],
+            ["workflow-run", "cancel", "abc"],
+            ["capability", "list"],
+            ["process-run", "status", "abc"],
+            ["experimental", "comfy-image"],
+            ["experimental", "generate-from-workflow", "--prompt", "asset", "--output", "asset.glb"],
             ["export", "--path", "Agent/foo.glb", "--output", "foo.glb"],
             ["batch", "--input-dir", "imgs", "--output-dir", "meshes"],
-            ["serve", "--print-command"],
-            ["ensure-server"],
+            ["dev", "serve-api", "--print-command"],
+            ["dev", "ensure-server"],
+            ["legacy", "job", "abc"],
+            ["legacy", "cancel", "abc"],
         ]
         for argv in cases:
             with self.subTest(argv=argv):
                 args = parser.parse_args(argv)
                 self.assertTrue(callable(args.func))
+
+    def test_hidden_aliases_are_not_documented_as_canonical(self) -> None:
+        parser = agent.build_parser()
+        help_text = parser.format_help()
+        self.assertNotIn("comfy-image", help_text)
+        self.assertNotIn("ensure-server", help_text)
+        self.assertNotIn("job", help_text)
 
 
 if __name__ == "__main__":

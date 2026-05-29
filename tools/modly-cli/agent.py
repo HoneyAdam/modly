@@ -31,6 +31,12 @@ IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 class ModlyCliError(RuntimeError):
     """Expected user/API failure that should be reported as JSON."""
 
+    def __init__(self, message: str, *, code: str = "MODLY_CLI_ERROR", http_status: int | None = None) -> None:
+        super().__init__(message)
+        self.message = message
+        self.code = code
+        self.http_status = http_status
+
 
 def _json_print(data: dict[str, Any], *, compact: bool = False) -> None:
     if compact:
@@ -53,13 +59,13 @@ def _request_json(
             raw = resp.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
-        raise ModlyCliError(f"HTTP {exc.code} from {url}: {detail}") from exc
+        raise ModlyCliError(f"HTTP {exc.code} from {url}: {detail}", code=f"HTTP_{exc.code}", http_status=exc.code) from exc
     except urllib.error.URLError as exc:
-        raise ModlyCliError(f"Cannot reach Modly API at {url}: {exc.reason}") from exc
+        raise ModlyCliError(f"Cannot reach Modly API at {url}: {exc.reason}", code="API_UNAVAILABLE") from exc
     try:
         return json.loads(raw) if raw else {}
     except json.JSONDecodeError as exc:
-        raise ModlyCliError(f"Expected JSON from {url}, got: {raw[:500]}") from exc
+        raise ModlyCliError(f"Expected JSON from {url}, got: {raw[:500]}", code="INVALID_JSON_RESPONSE") from exc
 
 
 def _download(url: str, dest: Path, *, timeout: float) -> int:
@@ -75,11 +81,11 @@ def _download(url: str, dest: Path, *, timeout: float) -> int:
                 total += len(chunk)
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
-        raise ModlyCliError(f"HTTP {exc.code} while downloading {url}: {detail}") from exc
+        raise ModlyCliError(f"HTTP {exc.code} while downloading {url}: {detail}", code=f"HTTP_{exc.code}", http_status=exc.code) from exc
     except urllib.error.URLError as exc:
-        raise ModlyCliError(f"Cannot download {url}: {exc.reason}") from exc
+        raise ModlyCliError(f"Cannot download {url}: {exc.reason}", code="DOWNLOAD_FAILED") from exc
     except OSError as exc:
-        raise ModlyCliError(f"Cannot write to {dest}: {exc}") from exc
+        raise ModlyCliError(f"Cannot write to {dest}: {exc}", code="WRITE_FAILED") from exc
 
 
 def _multipart_form(fields: dict[str, str], file_field: str, file_path: Path) -> tuple[bytes, str]:
@@ -126,6 +132,63 @@ def _try_health(base_url: str, timeout: float) -> dict[str, Any] | None:
     except ModlyCliError:
         return None
     return health if isinstance(health, dict) else {"raw": health}
+
+
+def _require_health(base_url: str, timeout: float) -> dict[str, Any]:
+    health = _request_json("GET", f"{base_url.rstrip('/')}/health", timeout=timeout)
+    return health if isinstance(health, dict) else {"raw": health}
+
+
+def _model_catalog(base_url: str, timeout: float) -> list[dict[str, Any]]:
+    data = _request_json("GET", f"{base_url.rstrip('/')}/model/all", timeout=timeout)
+    if not isinstance(data, list):
+        raise ModlyCliError(f"Expected /model/all to return a list, got: {data}", code="INVALID_MODEL_CATALOG")
+    return [model for model in data if isinstance(model, dict)]
+
+
+def _model_ids(models: list[dict[str, Any]]) -> set[str]:
+    return {str(model["id"]) for model in models if model.get("id")}
+
+
+def _validate_model_id(base_url: str, request_timeout: float, model_id: str, models: list[dict[str, Any]] | None = None) -> str:
+    models = models if models is not None else _model_catalog(base_url, request_timeout)
+    ids = _model_ids(models)
+    if model_id not in ids:
+        available = ", ".join(sorted(ids)) or "(none)"
+        raise ModlyCliError(
+            f"Unknown model id '{model_id}'. Use one of: {available}",
+            code="INVALID_MODEL_ID",
+        )
+    return model_id
+
+
+def _recovery_meta(base_url: str, run_id: str, *, legacy: bool = False, extra: dict[str, Any] | None = None) -> dict[str, Any]:
+    prefix = "python tools/modly-cli/agent.py"
+    if base_url.rstrip("/") != DEFAULT_BASE_URL.rstrip("/"):
+        prefix = f"{prefix} --base-url {base_url.rstrip('/')}"
+    group = "legacy job" if legacy else "workflow-run status"
+    cancel = "legacy cancel" if legacy else "workflow-run cancel"
+    meta = {
+        "status_command": f"{prefix} {group} {run_id}",
+        "cancel_command": f"{prefix} {cancel} {run_id}",
+        "legacy": legacy,
+    }
+    if extra:
+        meta.update(extra)
+    return meta
+
+
+def _unsupported_process(message: str = "This process is not available through the canonical process-run contract.") -> ModlyCliError:
+    return ModlyCliError(message, code="UNSUPPORTED_PROCESS")
+
+
+def _request_supported_contract(method: str, url: str, *, timeout: float, data: bytes | None = None, headers: dict[str, str] | None = None) -> Any:
+    try:
+        return _request_json(method, url, timeout=timeout, data=data, headers=headers)
+    except ModlyCliError as exc:
+        if exc.http_status == 404:
+            raise _unsupported_process() from exc
+        raise
 
 
 def _repo_root() -> Path:
@@ -263,9 +326,22 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 def cmd_models(args: argparse.Namespace) -> int:
     base_url = args.base_url.rstrip("/")
+    _require_health(base_url, args.request_timeout)
     data = _request_json("GET", f"{base_url}/model/all", timeout=args.request_timeout)
-    _json_print({"ok": True, "base_url": base_url, "models": data}, compact=args.compact)
+    _json_print({"ok": True, "base_url": base_url, "models": data, "meta": {"canonical": "model list"}}, compact=args.compact)
     return 0
+
+
+def cmd_model_status(args: argparse.Namespace) -> int:
+    base_url = args.base_url.rstrip("/")
+    _require_health(base_url, args.request_timeout)
+    data = _request_json("GET", f"{base_url}/model/status", timeout=args.request_timeout)
+    _json_print({"ok": True, "base_url": base_url, "model": data}, compact=args.compact)
+    return 0
+
+
+def cmd_model_list(args: argparse.Namespace) -> int:
+    return cmd_models(args)
 
 
 def _parse_params(params_json: str | None, params_file: str | None) -> dict[str, Any]:
@@ -283,29 +359,10 @@ def _parse_params(params_json: str | None, params_file: str | None) -> dict[str,
 
 
 def _choose_auto_model(base_url: str, request_timeout: float) -> str:
-    models = _request_json("GET", f"{base_url.rstrip('/')}/model/all", timeout=request_timeout)
-    if not isinstance(models, list) or not models:
-        active = _request_json("GET", f"{base_url.rstrip('/')}/model/status", timeout=request_timeout)
-        if isinstance(active, dict) and active.get("id"):
-            return str(active["id"])
-        raise ModlyCliError(f"Could not resolve a model id: {models}")
-
-    def text(model: dict[str, Any]) -> str:
-        return f"{model.get('id', '')} {model.get('name', '')}".lower()
-
-    active_models = [m for m in models if isinstance(m, dict) and m.get("active")]
-    if active_models:
-        active_text = text(active_models[0])
-        if "refine" not in active_text and "texture" not in active_text:
-            return str(active_models[0].get("id"))
-
-    for model in models:
-        if isinstance(model, dict) and ("generate" in text(model) or str(model.get("id", "")).endswith("/generate")):
-            return str(model.get("id"))
-    first = models[0]
-    if isinstance(first, dict) and first.get("id"):
-        return str(first["id"])
-    raise ModlyCliError(f"Could not resolve a model id: {models}")
+    active = _request_json("GET", f"{base_url.rstrip('/')}/model/status", timeout=request_timeout)
+    if not isinstance(active, dict) or not active.get("id"):
+        raise ModlyCliError(f"Could not resolve active model id: {active}", code="MODEL_NOT_READY")
+    return _validate_model_id(base_url, request_timeout, str(active["id"]))
 
 
 def _resolve_model_id(args: argparse.Namespace, base_url: str) -> str:
@@ -315,35 +372,36 @@ def _resolve_model_id(args: argparse.Namespace, base_url: str) -> str:
     if model_id == "active":
         active = _request_json("GET", f"{base_url}/model/status", timeout=args.request_timeout)
         if not isinstance(active, dict) or not active.get("id"):
-            raise ModlyCliError(f"Could not resolve active model id: {active}")
-        return str(active["id"])
-    return str(model_id)
+            raise ModlyCliError(f"Could not resolve active model id: {active}", code="MODEL_NOT_READY")
+        return _validate_model_id(base_url, args.request_timeout, str(active["id"]))
+    return _validate_model_id(base_url, args.request_timeout, str(model_id))
 
 
 def cmd_params(args: argparse.Namespace) -> int:
     base_url = args.base_url.rstrip("/")
-    model_id = args.model
-    if model_id == "auto":
-        model_id = _choose_auto_model(base_url, args.request_timeout)
+    _require_health(base_url, args.request_timeout)
+    model_id = _resolve_model_id(args, base_url)
     query = ""
-    if model_id and model_id != "active":
+    if model_id:
         query = "?" + urllib.parse.urlencode({"model_id": model_id})
     params = _request_json("GET", f"{base_url}/model/params{query}", timeout=args.request_timeout)
-    _json_print({"ok": True, "base_url": base_url, "model_id": model_id, "params": params}, compact=args.compact)
+    _json_print({"ok": True, "base_url": base_url, "model_id": model_id, "params": params, "meta": {"canonical": "model params"}}, compact=args.compact)
     return 0
 
 
 def cmd_job(args: argparse.Namespace) -> int:
     base_url = args.base_url.rstrip("/")
+    _require_health(base_url, args.request_timeout)
     status = _request_json("GET", f"{base_url}/generate/status/{urllib.parse.quote(args.job_id)}", timeout=args.request_timeout)
-    _json_print({"ok": True, "base_url": base_url, "job_id": args.job_id, "status": status}, compact=args.compact)
+    _json_print({"ok": True, "base_url": base_url, "job_id": args.job_id, "status": status, "meta": _recovery_meta(base_url, args.job_id, legacy=True)}, compact=args.compact)
     return 0
 
 
 def cmd_cancel(args: argparse.Namespace) -> int:
     base_url = args.base_url.rstrip("/")
+    _require_health(base_url, args.request_timeout)
     result = _request_json("POST", f"{base_url}/generate/cancel/{urllib.parse.quote(args.job_id)}", timeout=args.request_timeout)
-    _json_print({"ok": True, "base_url": base_url, "job_id": args.job_id, "cancel": result}, compact=args.compact)
+    _json_print({"ok": True, "base_url": base_url, "job_id": args.job_id, "cancel": result, "meta": _recovery_meta(base_url, args.job_id, legacy=True)}, compact=args.compact)
     return 0
 
 
@@ -495,18 +553,144 @@ def _run_comfy_image(args: argparse.Namespace) -> dict[str, Any]:
 
 def cmd_comfy_image(args: argparse.Namespace) -> int:
     result = _run_comfy_image(args)
+    result["meta"] = {"experimental": True, "canonical": False}
     _json_print(result, compact=args.compact)
     return 0
 
 
 def cmd_generate_from_workflow(args: argparse.Namespace) -> int:
+    _require_health(args.base_url.rstrip("/"), args.request_timeout)
     comfy = _run_comfy_image(args)
     output = Path(args.output).expanduser().resolve() if args.output else None
     result = _generate_one(args, Path(str(comfy["image_path"])), output)
     result["source"] = "comfy-workflow"
     result["comfy"] = comfy
+    result.setdefault("meta", {})["experimental"] = True
     _json_print(result, compact=args.compact)
     return 0
+
+
+def _canonical_generation_params(args: argparse.Namespace) -> dict[str, Any]:
+    params = _parse_params(getattr(args, "params_json", None), getattr(args, "params_file", None))
+    params.setdefault("remesh", getattr(args, "remesh", "quad"))
+    params.setdefault("enable_texture", bool(getattr(args, "enable_texture", True)))
+    params.setdefault("texture_resolution", getattr(args, "texture_resolution", 1024))
+    return params
+
+
+def _workflow_workspace_path(status: dict[str, Any]) -> str:
+    scene_candidate = status.get("scene_candidate")
+    if isinstance(scene_candidate, dict) and scene_candidate.get("workspace_path"):
+        return str(scene_candidate["workspace_path"])
+    output_url = str(status.get("output_url") or "")
+    if output_url:
+        return _workspace_relative_path(output_url)
+    raise ModlyCliError(f"Workflow run completed without an output path: {status}", code="MISSING_OUTPUT")
+
+
+def _start_workflow_run(args: argparse.Namespace, image_path: Path, *, base_url: str, model_id: str, params: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    fields = {
+        "model_id": model_id,
+        "params": json.dumps(params, separators=(",", ":")),
+    }
+    if getattr(args, "collection", None):
+        fields["collection"] = str(args.collection)
+    body, content_type = _multipart_form(fields, "image", image_path)
+    started = _request_json(
+        "POST",
+        f"{base_url}/workflow-runs/from-image",
+        timeout=args.request_timeout,
+        data=body,
+        headers={"Content-Type": content_type},
+    )
+    run_id = started.get("run_id") if isinstance(started, dict) else None
+    if not run_id:
+        raise ModlyCliError(f"Modly did not return a run_id: {started}", code="MISSING_RUN_ID")
+    return str(run_id), started if isinstance(started, dict) else {"raw": started}
+
+
+def _poll_workflow_run(args: argparse.Namespace, *, base_url: str, run_id: str, progress_label: str = "workflow-run") -> tuple[dict[str, Any], str]:
+    deadline = time.monotonic() + args.timeout
+    last_status: dict[str, Any] = {}
+    while time.monotonic() < deadline:
+        status = _request_json("GET", f"{base_url}/workflow-runs/{urllib.parse.quote(str(run_id))}", timeout=args.request_timeout)
+        last_status = status if isinstance(status, dict) else {"raw": status}
+        state = last_status.get("status")
+        if state == "done":
+            return last_status, _workflow_workspace_path(last_status)
+        if state in {"error", "cancelled"}:
+            raise ModlyCliError(f"Workflow run {run_id} ended with status {state}: {last_status}", code="WORKFLOW_RUN_FAILED")
+        if getattr(args, "progress", False) and not getattr(args, "quiet", False):
+            progress = last_status.get("progress", 0)
+            step = last_status.get("step", "")
+            print(json.dumps({"phase": progress_label, "run_id": run_id, "status": state, "progress": progress, "step": step}), file=sys.stderr)
+        time.sleep(args.poll)
+
+    raise ModlyCliError(f"Timed out waiting for workflow run {run_id}. Last status: {last_status}", code="TIMEOUT")
+
+
+def _run_workflow_run(
+    args: argparse.Namespace,
+    image_path: Path,
+    *,
+    base_url: str,
+    model_id: str,
+    params: dict[str, Any],
+    wait: bool,
+) -> tuple[str, dict[str, Any], str | None]:
+    run_id, started = _start_workflow_run(args, image_path, base_url=base_url, model_id=model_id, params=params)
+    if not wait:
+        return run_id, started, None
+    status, rel_path = _poll_workflow_run(args, base_url=base_url, run_id=run_id)
+    return run_id, status, rel_path
+
+
+def cmd_workflow_run_start(args: argparse.Namespace) -> int:
+    base_url = args.base_url.rstrip("/")
+    _require_health(base_url, args.request_timeout)
+    image_path = Path(args.image).expanduser().resolve()
+    if not image_path.exists() or not image_path.is_file():
+        raise ModlyCliError(f"image file not found: {image_path}", code="IMAGE_NOT_FOUND")
+    model_id = _resolve_model_id(args, base_url)
+    params = _canonical_generation_params(args)
+    run_id, status, rel_path = _run_workflow_run(args, image_path, base_url=base_url, model_id=model_id, params=params, wait=getattr(args, "wait", False))
+    payload: dict[str, Any] = {
+        "ok": True,
+        "base_url": base_url,
+        "image": str(image_path),
+        "model_id": model_id,
+        "run": {"kind": "workflowRun", "id": run_id},
+        "status": status,
+        "meta": _recovery_meta(base_url, run_id),
+    }
+    if rel_path:
+        payload["workspace_path"] = rel_path
+    _json_print(payload, compact=args.compact)
+    return 0
+
+
+def cmd_workflow_run_status(args: argparse.Namespace) -> int:
+    base_url = args.base_url.rstrip("/")
+    _require_health(base_url, args.request_timeout)
+    status = _request_json("GET", f"{base_url}/workflow-runs/{urllib.parse.quote(args.run_id)}", timeout=args.request_timeout)
+    _json_print({"ok": True, "base_url": base_url, "run": {"kind": "workflowRun", "id": args.run_id}, "status": status, "meta": _recovery_meta(base_url, args.run_id)}, compact=args.compact)
+    return 0
+
+
+def cmd_workflow_run_cancel(args: argparse.Namespace) -> int:
+    base_url = args.base_url.rstrip("/")
+    _require_health(base_url, args.request_timeout)
+    result = _request_json("POST", f"{base_url}/workflow-runs/{urllib.parse.quote(args.run_id)}/cancel", timeout=args.request_timeout)
+    _json_print({"ok": True, "base_url": base_url, "run": {"kind": "workflowRun", "id": args.run_id}, "cancel": result, "meta": _recovery_meta(base_url, args.run_id)}, compact=args.compact)
+    return 0
+
+
+def _ensure_no_external_texture_process(args: argparse.Namespace) -> None:
+    if getattr(args, "texture_model", "auto") not in (None, "", "auto"):
+        raise _unsupported_process()
+    if getattr(args, "texture_params_json", None) or getattr(args, "texture_params_file", None):
+        raise _unsupported_process()
+
 
 def _run_generation_job(
     args: argparse.Namespace,
@@ -559,84 +743,48 @@ def _run_generation_job(
     raise ModlyCliError(f"Timed out waiting for job {job_id}. Last status: {last_status}")
 
 
-def _texture_model_id(args: argparse.Namespace, base_url: str) -> str | None:
-    requested = getattr(args, "texture_model", "auto")
-    if requested and requested != "auto":
-        return str(requested)
-    models = _request_json("GET", f"{base_url}/model/all", timeout=args.request_timeout)
-    if not isinstance(models, list):
-        return None
-    for model in models:
-        if not isinstance(model, dict):
-            continue
-        text = f"{model.get('id', '')} {model.get('name', '')}".lower()
-        if "refine" in text or "texture" in text:
-            return str(model.get("id"))
-    return None
-
-
 def _generate_one(args: argparse.Namespace, image_path: Path, output_path: Path | None = None) -> dict[str, Any]:
     base_url = args.base_url.rstrip("/")
+    _require_health(base_url, args.request_timeout)
     image_path = image_path.expanduser().resolve()
     if not image_path.exists() or not image_path.is_file():
-        raise ModlyCliError(f"image file not found: {image_path}")
+        raise ModlyCliError(f"image file not found: {image_path}", code="IMAGE_NOT_FOUND")
 
-    params = _parse_params(getattr(args, "params_json", None), getattr(args, "params_file", None))
+    _ensure_no_external_texture_process(args)
+    params = _canonical_generation_params(args)
     model_id = _resolve_model_id(args, base_url)
-    job_id, status, rel_path = _run_generation_job(
+    run_id, status, rel_path = _run_workflow_run(
         args,
         image_path,
         base_url=base_url,
         model_id=model_id,
         params=params,
-        progress_label="generate",
+        wait=True,
     )
+    assert rel_path is not None
 
-    texture_enabled = bool(getattr(args, "enable_texture", True))
-    texture_job_id = None
-    texture_status = None
-    texture_model_id = None
-    geometry_workspace_path = rel_path
-    if texture_enabled and "refine" not in model_id.lower() and "texture" not in model_id.lower():
-        texture_model_id = _texture_model_id(args, base_url)
-        if texture_model_id:
-            texture_params = _parse_params(getattr(args, "texture_params_json", None), getattr(args, "texture_params_file", None))
-            texture_params.setdefault("mesh_path", rel_path)
-            texture_params.setdefault("texture_resolution", getattr(args, "texture_resolution", 1024))
-            texture_params.setdefault("texture_size", getattr(args, "texture_size", 2048))
-            texture_params.setdefault("texture_steps", getattr(args, "texture_steps", 30))
-            texture_params.setdefault("texture_guidance", getattr(args, "texture_guidance", 3.0))
-            texture_job_id, texture_status, rel_path = _run_generation_job(
-                args,
-                image_path,
-                base_url=base_url,
-                model_id=texture_model_id,
-                params=texture_params,
-                progress_label="texture",
-            )
-        else:
-            texture_enabled = False
-
-    export_dest = output_path or image_path.resolve().parent / f"{Path(rel_path).stem}.{args.format}"
-    export_dest = export_dest.expanduser().resolve()
-    bytes_written = _export_workspace_path(base_url, rel_path, args.format, export_dest, timeout=args.request_timeout)
-    return {
+    export_dest = None
+    bytes_written = None
+    if not getattr(args, "no_export", False):
+        export_dest = output_path or image_path.resolve().parent / f"{Path(rel_path).stem}.{args.format}"
+        export_dest = export_dest.expanduser().resolve()
+        bytes_written = _export_workspace_path(base_url, rel_path, args.format, export_dest, timeout=args.request_timeout)
+    result: dict[str, Any] = {
         "ok": True,
         "base_url": base_url,
         "image": str(image_path),
         "model_id": model_id,
-        "job_id": job_id,
+        "run": {"kind": "workflowRun", "id": run_id},
         "status": status,
         "workspace_path": rel_path,
-        "geometry_workspace_path": geometry_workspace_path,
-        "texture_enabled": texture_enabled,
-        "texture_model_id": texture_model_id,
-        "texture_job_id": texture_job_id,
-        "texture_status": texture_status,
+        "texture_enabled": bool(params.get("enable_texture")),
         "export_format": args.format,
-        "export_path": str(export_dest),
-        "bytes_written": bytes_written,
+        "meta": _recovery_meta(base_url, run_id),
     }
+    if export_dest is not None:
+        result["export_path"] = str(export_dest)
+        result["bytes_written"] = bytes_written
+    return result
 
 
 def cmd_generate(args: argparse.Namespace) -> int:
@@ -646,8 +794,48 @@ def cmd_generate(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_legacy_generate(args: argparse.Namespace) -> int:
+    base_url = args.base_url.rstrip("/")
+    _require_health(base_url, args.request_timeout)
+    image_path = Path(args.image).expanduser().resolve()
+    if not image_path.exists() or not image_path.is_file():
+        raise ModlyCliError(f"image file not found: {image_path}", code="IMAGE_NOT_FOUND")
+    params = _parse_params(getattr(args, "params_json", None), getattr(args, "params_file", None))
+    model_id = _resolve_model_id(args, base_url)
+    job_id, status, rel_path = _run_generation_job(
+        args,
+        image_path,
+        base_url=base_url,
+        model_id=model_id,
+        params=params,
+        progress_label="legacy-generate",
+    )
+    export_dest = None
+    bytes_written = None
+    if not getattr(args, "no_export", False):
+        export_dest = Path(args.output).expanduser().resolve() if args.output else image_path.resolve().parent / f"{Path(rel_path).stem}.{args.format}"
+        bytes_written = _export_workspace_path(base_url, rel_path, args.format, export_dest, timeout=args.request_timeout)
+    payload: dict[str, Any] = {
+        "ok": True,
+        "base_url": base_url,
+        "image": str(image_path),
+        "model_id": model_id,
+        "job_id": job_id,
+        "status": status,
+        "workspace_path": rel_path,
+        "export_format": args.format,
+        "meta": _recovery_meta(base_url, job_id, legacy=True),
+    }
+    if export_dest is not None:
+        payload["export_path"] = str(export_dest)
+        payload["bytes_written"] = bytes_written
+    _json_print(payload, compact=args.compact)
+    return 0
+
+
 def cmd_export(args: argparse.Namespace) -> int:
     base_url = args.base_url.rstrip("/")
+    _require_health(base_url, args.request_timeout)
     dest = Path(args.output).expanduser().resolve()
     bytes_written = _export_workspace_path(base_url, args.path, args.format, dest, timeout=args.request_timeout)
     _json_print({
@@ -736,12 +924,13 @@ def cmd_batch(args: argparse.Namespace) -> int:
 def cmd_serve(args: argparse.Namespace) -> int:
     api_dir, _python, env, cmd, base_url = _resolve_serve_config(args)
     public_env = {k: env.get(k, "") for k in ["MODELS_DIR", "WORKSPACE_DIR", "EXTENSIONS_DIR", "SELECTED_MODEL_ID"]}
+    meta = {"dev_only": True, "canonical": False}
     if args.print_command:
-        _json_print({"ok": True, "cmd": cmd, "cwd": str(api_dir), "base_url": base_url, "env": public_env}, compact=args.compact)
+        _json_print({"ok": True, "cmd": cmd, "cwd": str(api_dir), "base_url": base_url, "env": public_env, "meta": meta}, compact=args.compact)
         return 0
     proc = _start_backend(cmd, api_dir=api_dir, env=env, detach=args.detach)
     if args.detach:
-        _json_print({"ok": True, "started": True, "pid": proc.pid, "base_url": base_url, "cmd": cmd, "cwd": str(api_dir), "env": public_env}, compact=args.compact)
+        _json_print({"ok": True, "started": True, "pid": proc.pid, "base_url": base_url, "cmd": cmd, "cwd": str(api_dir), "env": public_env, "meta": meta}, compact=args.compact)
         return 0
     return int(proc.wait())
 
@@ -749,24 +938,71 @@ def cmd_serve(args: argparse.Namespace) -> int:
 def cmd_ensure_server(args: argparse.Namespace) -> int:
     base_url = args.base_url.rstrip("/")
     health = _try_health(base_url, args.request_timeout)
+    meta = {"dev_only": True, "canonical": False}
     if health:
-        _json_print({"ok": True, "started": False, "base_url": base_url, "health": health}, compact=args.compact)
+        _json_print({"ok": True, "started": False, "base_url": base_url, "health": health, "meta": meta}, compact=args.compact)
         return 0
     if not args.start:
         message = "Modly API is not running; launch Modly or run ensure-server --start"
         if args.fail_on_unavailable:
-            raise ModlyCliError(message)
-        _json_print({"ok": False, "started": False, "base_url": base_url, "error": message}, compact=args.compact)
+            raise ModlyCliError(message, code="API_UNAVAILABLE")
+        _json_print({"ok": False, "started": False, "base_url": base_url, "error": message, "code": "API_UNAVAILABLE", "message": message, "meta": meta}, compact=args.compact)
         return 0
     api_dir, _python, env, cmd, resolved_url = _resolve_serve_config(args)
     public_env = {k: env.get(k, "") for k in ["MODELS_DIR", "WORKSPACE_DIR", "EXTENSIONS_DIR", "SELECTED_MODEL_ID"]}
     if args.print_command:
-        _json_print({"ok": True, "started": False, "would_start": True, "base_url": resolved_url, "cmd": cmd, "cwd": str(api_dir), "env": public_env}, compact=args.compact)
+        _json_print({"ok": True, "started": False, "would_start": True, "base_url": resolved_url, "cmd": cmd, "cwd": str(api_dir), "env": public_env, "meta": meta}, compact=args.compact)
         return 0
     proc = _start_backend(cmd, api_dir=api_dir, env=env, detach=args.detach)
-    _json_print({"ok": True, "started": True, "pid": proc.pid, "base_url": resolved_url, "cmd": cmd, "cwd": str(api_dir), "env": public_env}, compact=args.compact)
+    _json_print({"ok": True, "started": True, "pid": proc.pid, "base_url": resolved_url, "cmd": cmd, "cwd": str(api_dir), "env": public_env, "meta": meta}, compact=args.compact)
     if not args.detach:
         return int(proc.wait())
+    return 0
+
+
+def cmd_capability_list(args: argparse.Namespace) -> int:
+    base_url = args.base_url.rstrip("/")
+    _require_health(base_url, args.request_timeout)
+    data = _request_supported_contract("GET", f"{base_url}/automation/capabilities", timeout=args.request_timeout)
+    _json_print({"ok": True, "base_url": base_url, "capabilities": data}, compact=args.compact)
+    return 0
+
+
+def _json_arg(value: str | None, file_value: str | None) -> dict[str, Any]:
+    return _parse_params(value, file_value)
+
+
+def cmd_process_run_start(args: argparse.Namespace) -> int:
+    base_url = args.base_url.rstrip("/")
+    _require_health(base_url, args.request_timeout)
+    payload = _json_arg(getattr(args, "input_json", None), getattr(args, "input_file", None))
+    body = json.dumps({"process": args.process, "input": payload}, separators=(",", ":")).encode("utf-8")
+    data = _request_supported_contract("POST", f"{base_url}/process-runs", timeout=args.request_timeout, data=body, headers={"Content-Type": "application/json"})
+    run_id = data.get("run_id") if isinstance(data, dict) else None
+    output = {"ok": True, "base_url": base_url, "run": {"kind": "processRun", "id": str(run_id) if run_id else ""}, "status": data}
+    if run_id:
+        output["meta"] = {
+            "status_command": f"python tools/modly-cli/agent.py process-run status {run_id}",
+            "cancel_command": f"python tools/modly-cli/agent.py process-run cancel {run_id}",
+            "legacy": False,
+        }
+    _json_print(output, compact=args.compact)
+    return 0
+
+
+def cmd_process_run_status(args: argparse.Namespace) -> int:
+    base_url = args.base_url.rstrip("/")
+    _require_health(base_url, args.request_timeout)
+    data = _request_supported_contract("GET", f"{base_url}/process-runs/{urllib.parse.quote(args.run_id)}", timeout=args.request_timeout)
+    _json_print({"ok": True, "base_url": base_url, "run": {"kind": "processRun", "id": args.run_id}, "status": data}, compact=args.compact)
+    return 0
+
+
+def cmd_process_run_cancel(args: argparse.Namespace) -> int:
+    base_url = args.base_url.rstrip("/")
+    _require_health(base_url, args.request_timeout)
+    data = _request_supported_contract("POST", f"{base_url}/process-runs/{urllib.parse.quote(args.run_id)}/cancel", timeout=args.request_timeout)
+    _json_print({"ok": True, "base_url": base_url, "run": {"kind": "processRun", "id": args.run_id}, "cancel": data}, compact=args.compact)
     return 0
 
 
@@ -783,6 +1019,7 @@ def _add_generation_options(parser: argparse.ArgumentParser, *, image: bool, out
         parser.add_argument("--image", required=True, help="Input image path")
     if output:
         parser.add_argument("--output", help="Export destination path. Defaults beside the input image")
+        parser.add_argument("--no-export", action="store_true", help="Do not download/export the completed workspace mesh")
     parser.add_argument("--format", choices=EXPORT_FORMATS, default="glb", help="Export format (default: glb)")
     parser.add_argument("--model", default="auto", help="Model id to use, 'active', or 'auto' (default: auto)")
     parser.add_argument("--collection", default="Agent", help="Modly workspace collection (default: Agent)")
@@ -791,12 +1028,12 @@ def _add_generation_options(parser: argparse.ArgumentParser, *, image: bool, out
     parser.add_argument("--no-texture", dest="enable_texture", action="store_false", help="Disable texture generation for faster geometry-only smoke tests")
     parser.add_argument("--enable-texture", dest="enable_texture", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--texture-resolution", type=int, default=1024, help="Texture diffusion resolution when texturing is enabled")
-    parser.add_argument("--texture-model", default="auto", help="Texture/refine model id, or 'auto' (default: auto)")
+    parser.add_argument("--texture-model", default="auto", help="External texture process id. Unsupported unless the server exposes canonical process-run support.")
     parser.add_argument("--texture-size", type=int, default=2048, help="Texture atlas size when texturing is enabled (default: 2048)")
     parser.add_argument("--texture-steps", type=int, default=30, help="Texture diffusion steps when texturing is enabled (default: 30)")
     parser.add_argument("--texture-guidance", type=float, default=3.0, help="Texture guidance strength when texturing is enabled (default: 3.0)")
-    parser.add_argument("--texture-params-json", help="Texture/refine params as a JSON object")
-    parser.add_argument("--texture-params-file", help="Path to texture/refine params JSON file")
+    parser.add_argument("--texture-params-json", help="External texture process params as a JSON object")
+    parser.add_argument("--texture-params-file", help="Path to external texture process params JSON file")
     parser.add_argument("--params-json", help="Model-specific params as a JSON object")
     parser.add_argument("--params-file", help="Path to model-specific params JSON file")
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS, help=f"Generation timeout in seconds (default: {DEFAULT_TIMEOUT_SECONDS})")
@@ -831,7 +1068,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--request-timeout", type=float, default=30, help="Per-request timeout in seconds (default: 30)")
     parser.add_argument("--compact", action="store_true", help="Print compact one-line JSON")
     parser.add_argument("--quiet", action="store_true", help="Suppress progress output; final JSON is still printed")
-    sub = parser.add_subparsers(dest="command", required=True)
+    canonical_commands = "{health,status,model,workflow-run,capability,process-run,generate,export,batch,dev,experimental,legacy}"
+    sub = parser.add_subparsers(dest="command", required=True, metavar=canonical_commands)
 
     health = sub.add_parser("health", help="Check that Modly's local API is reachable")
     health.set_defaults(func=cmd_health)
@@ -839,36 +1077,51 @@ def build_parser() -> argparse.ArgumentParser:
     status = sub.add_parser("status", help="Show API health and active model status")
     status.set_defaults(func=cmd_status)
 
-    models = sub.add_parser("models", help="List installed/available model adapters")
-    models.set_defaults(func=cmd_models)
+    model = sub.add_parser("model", help="Inspect canonical model state")
+    model_sub = model.add_subparsers(dest="model_command", required=True)
+    model_list = model_sub.add_parser("list", help="List model adapters known to the running app")
+    model_list.set_defaults(func=cmd_model_list)
+    model_status = model_sub.add_parser("status", help="Show active model status")
+    model_status.set_defaults(func=cmd_model_status)
+    model_params = model_sub.add_parser("params", help="Show parameter schema for a validated model id")
+    model_params.add_argument("--model", default="auto", help="Model id, 'active', or 'auto' for the validated active model (default: auto)")
+    model_params.set_defaults(func=cmd_params)
 
-    params = sub.add_parser("params", help="Show model parameter schema")
-    params.add_argument("--model", default="auto", help="Model id, 'active', or 'auto' (default: auto)")
-    params.set_defaults(func=cmd_params)
+    workflow = sub.add_parser("workflow-run", help="Start, inspect, and cancel canonical workflow runs")
+    workflow_sub = workflow.add_subparsers(dest="workflow_command", required=True)
+    workflow_start = workflow_sub.add_parser("start", help="Start a workflow run from an image")
+    _add_generation_options(workflow_start, image=True, output=False)
+    workflow_start.add_argument("--wait", action="store_true", help="Wait for completion and include workspace_path")
+    workflow_start.set_defaults(func=cmd_workflow_run_start)
+    workflow_status = workflow_sub.add_parser("status", help="Show workflow run status")
+    workflow_status.add_argument("run_id")
+    workflow_status.set_defaults(func=cmd_workflow_run_status)
+    workflow_cancel = workflow_sub.add_parser("cancel", help="Cancel a workflow run")
+    workflow_cancel.add_argument("run_id")
+    workflow_cancel.set_defaults(func=cmd_workflow_run_cancel)
 
-    job = sub.add_parser("job", help="Show one generation job status")
-    job.add_argument("job_id")
-    job.set_defaults(func=cmd_job)
+    capability = sub.add_parser("capability", help="Discover canonical automation capabilities")
+    capability_sub = capability.add_subparsers(dest="capability_command", required=True)
+    capability_list = capability_sub.add_parser("list", help="List automation capabilities when the server exposes them")
+    capability_list.set_defaults(func=cmd_capability_list)
 
-    cancel = sub.add_parser("cancel", help="Cancel one generation job")
-    cancel.add_argument("job_id")
-    cancel.set_defaults(func=cmd_cancel)
+    process = sub.add_parser("process-run", help="Start, inspect, and cancel canonical process runs")
+    process_sub = process.add_subparsers(dest="process_command", required=True)
+    process_start = process_sub.add_parser("start", help="Start a process run when the server exposes the canonical contract")
+    process_start.add_argument("--process", required=True, help="Canonical process id")
+    process_start.add_argument("--input-json", help="Process input as a JSON object")
+    process_start.add_argument("--input-file", help="Path to process input JSON object")
+    process_start.set_defaults(func=cmd_process_run_start)
+    process_status = process_sub.add_parser("status", help="Show process run status")
+    process_status.add_argument("run_id")
+    process_status.set_defaults(func=cmd_process_run_status)
+    process_cancel = process_sub.add_parser("cancel", help="Cancel a process run")
+    process_cancel.add_argument("run_id")
+    process_cancel.set_defaults(func=cmd_process_run_cancel)
 
     gen = sub.add_parser("generate", help="Generate a 3D mesh from an image, wait, export it, and print JSON")
     _add_generation_options(gen, image=True, output=True)
     gen.set_defaults(func=cmd_generate)
-
-    comfy = sub.add_parser("comfy-image", help="Run a preconfigured ComfyUI workflow and save its first image output")
-    _add_comfy_options(comfy)
-    comfy.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS, help=f"ComfyUI timeout in seconds (default: {DEFAULT_TIMEOUT_SECONDS})")
-    comfy.add_argument("--poll", type=float, default=DEFAULT_POLL_SECONDS, help=f"Polling interval in seconds (default: {DEFAULT_POLL_SECONDS})")
-    comfy.add_argument("--progress", action="store_true", help="Emit progress JSON lines to stderr while waiting")
-    comfy.set_defaults(func=cmd_comfy_image)
-
-    wf = sub.add_parser("generate-from-workflow", help="Run a ComfyUI workflow (default: Trellis2Workflow), feed its image output into Modly, and export the mesh")
-    _add_comfy_options(wf)
-    _add_generation_options(wf, image=False, output=True)
-    wf.set_defaults(func=cmd_generate_from_workflow)
 
     exp = sub.add_parser("export", help="Export an existing workspace mesh path")
     exp.add_argument("--path", required=True, help="Workspace-relative mesh path, e.g. Agent/foo.glb")
@@ -884,14 +1137,71 @@ def build_parser() -> argparse.ArgumentParser:
     _add_generation_options(batch, image=False, output=False, batch=True)
     batch.set_defaults(func=cmd_batch)
 
-    serve = sub.add_parser("serve", help="Start Modly FastAPI backend without Electron UI")
+    dev = sub.add_parser("dev", help="Developer-only local API helpers")
+    dev_sub = dev.add_subparsers(dest="dev_command", required=True)
+    serve = dev_sub.add_parser("serve-api", help="Start only the FastAPI backend without Electron/Desktop bridge readiness")
     _add_serve_options(serve)
     serve.set_defaults(func=cmd_serve)
-
-    ensure = sub.add_parser("ensure-server", help="Check API health and optionally start headless backend")
+    ensure = dev_sub.add_parser("ensure-server", help="Check API health and optionally start only the FastAPI backend")
     _add_serve_options(ensure, include_start=True)
     ensure.add_argument("--fail-on-unavailable", action="store_true", help="Exit nonzero when API is unavailable")
     ensure.set_defaults(func=cmd_ensure_server)
+
+    experimental = sub.add_parser("experimental", help="Experimental external orchestration helpers")
+    experimental_sub = experimental.add_subparsers(dest="experimental_command", required=True)
+    comfy = experimental_sub.add_parser("comfy-image", help="Run a preconfigured ComfyUI workflow and save its first image output")
+    _add_comfy_options(comfy)
+    comfy.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS, help=f"ComfyUI timeout in seconds (default: {DEFAULT_TIMEOUT_SECONDS})")
+    comfy.add_argument("--poll", type=float, default=DEFAULT_POLL_SECONDS, help=f"Polling interval in seconds (default: {DEFAULT_POLL_SECONDS})")
+    comfy.add_argument("--progress", action="store_true", help="Emit progress JSON lines to stderr while waiting")
+    comfy.set_defaults(func=cmd_comfy_image)
+    wf = experimental_sub.add_parser("generate-from-workflow", help="Run a ComfyUI workflow, feed its image output into Modly, and export the mesh")
+    _add_comfy_options(wf)
+    _add_generation_options(wf, image=False, output=True)
+    wf.set_defaults(func=cmd_generate_from_workflow)
+
+    legacy = sub.add_parser("legacy", help="Explicit compatibility commands for /generate/* endpoints")
+    legacy_sub = legacy.add_subparsers(dest="legacy_command", required=True)
+    legacy_job = legacy_sub.add_parser("job", help="Show one legacy generation job status")
+    legacy_job.add_argument("job_id")
+    legacy_job.set_defaults(func=cmd_job)
+    legacy_cancel = legacy_sub.add_parser("cancel", help="Cancel one legacy generation job")
+    legacy_cancel.add_argument("job_id")
+    legacy_cancel.set_defaults(func=cmd_cancel)
+    legacy_gen = legacy_sub.add_parser("generate", help="Use the legacy /generate/from-image endpoint explicitly")
+    _add_generation_options(legacy_gen, image=True, output=True)
+    legacy_gen.set_defaults(func=cmd_legacy_generate)
+
+    models_alias = sub.add_parser("models", help=argparse.SUPPRESS)
+    models_alias.set_defaults(func=cmd_models)
+    params_alias = sub.add_parser("params", help=argparse.SUPPRESS)
+    params_alias.add_argument("--model", default="auto")
+    params_alias.set_defaults(func=cmd_params)
+    job_alias = sub.add_parser("job", help=argparse.SUPPRESS)
+    job_alias.add_argument("job_id")
+    job_alias.set_defaults(func=cmd_job)
+    cancel_alias = sub.add_parser("cancel", help=argparse.SUPPRESS)
+    cancel_alias.add_argument("job_id")
+    cancel_alias.set_defaults(func=cmd_cancel)
+    serve_alias = sub.add_parser("serve", help=argparse.SUPPRESS)
+    _add_serve_options(serve_alias)
+    serve_alias.set_defaults(func=cmd_serve)
+    ensure_alias = sub.add_parser("ensure-server", help=argparse.SUPPRESS)
+    _add_serve_options(ensure_alias, include_start=True)
+    ensure_alias.add_argument("--fail-on-unavailable", action="store_true")
+    ensure_alias.set_defaults(func=cmd_ensure_server)
+    comfy_alias = sub.add_parser("comfy-image", help=argparse.SUPPRESS)
+    _add_comfy_options(comfy_alias)
+    comfy_alias.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS)
+    comfy_alias.add_argument("--poll", type=float, default=DEFAULT_POLL_SECONDS)
+    comfy_alias.add_argument("--progress", action="store_true")
+    comfy_alias.set_defaults(func=cmd_comfy_image)
+    wf_alias = sub.add_parser("generate-from-workflow", help=argparse.SUPPRESS)
+    _add_comfy_options(wf_alias)
+    _add_generation_options(wf_alias, image=False, output=True)
+    wf_alias.set_defaults(func=cmd_generate_from_workflow)
+    hidden = {"models", "params", "job", "cancel", "serve", "ensure-server", "comfy-image", "generate-from-workflow"}
+    sub._choices_actions = [choice for choice in sub._choices_actions if getattr(choice, "dest", None) not in hidden]
     return parser
 
 
@@ -902,10 +1212,10 @@ def main(argv: list[str] | None = None) -> int:
         args = parser.parse_args(argv)
         return int(args.func(args))
     except ModlyCliError as exc:
-        _json_print({"ok": False, "error": str(exc)}, compact=getattr(args, "compact", False) if args else False)
+        _json_print({"ok": False, "code": exc.code, "message": exc.message, "error": exc.message}, compact=getattr(args, "compact", False) if args else False)
         return 1
     except KeyboardInterrupt:
-        _json_print({"ok": False, "error": "interrupted"}, compact=getattr(args, "compact", False) if args else False)
+        _json_print({"ok": False, "code": "INTERRUPTED", "message": "interrupted", "error": "interrupted"}, compact=getattr(args, "compact", False) if args else False)
         return 130
 
 
