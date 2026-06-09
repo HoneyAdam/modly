@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, webFrame } from 'electron'
 
 // Expose a typed API to the renderer process via window.electron
 contextBridge.exposeInMainWorld('electron', {
@@ -7,6 +7,11 @@ contextBridge.exposeInMainWorld('electron', {
     minimize: () => ipcRenderer.send('window:minimize'),
     maximize: () => ipcRenderer.send('window:maximize'),
     close:    () => ipcRenderer.send('window:close')
+  },
+
+  // Renderer UI (zoom whole page — scales every px/rem consistently)
+  ui: {
+    setZoomFactor: (factor: number) => webFrame.setZoomFactor(factor),
   },
 
   // Shell utilities
@@ -153,10 +158,17 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke('extensions:list'),
 
     installFromGitHub: (url: string): Promise<{
-      success: boolean; error?: string
+      success: boolean; error?: string; cancelled?: boolean
       extensionId?: string
       extension?: unknown
     }> => ipcRenderer.invoke('extensions:installFromGitHub', url),
+
+    installFromLocal: (): Promise<{
+      success: boolean; error?: string; cancelled?: boolean
+      extensionId?: string
+      extension?: unknown
+      localPath?: string
+    }> => ipcRenderer.invoke('extensions:installFromLocal'),
 
     uninstall: (extensionId: string): Promise<{ success: boolean; error?: string }> =>
       ipcRenderer.invoke('extensions:uninstall', extensionId),

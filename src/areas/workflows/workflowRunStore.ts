@@ -37,7 +37,7 @@ interface RunContext {
   allExtensions:      WorkflowExtension[]
   client:             AxiosInstance
   workspaceDir:       string
-  selectedImagePath:  string
+  selectedImagePath:  string | undefined
   selectedImageData?: string
   overrideImageData?: string
   nodeOutputs:        Map<string, NodeOutput>
@@ -177,12 +177,15 @@ async function executeExtensionNode(
 
   if (isModelNode) {
     const activeImagePath = nodeInputPath ?? selectedImagePath
+    if (!selectedImageData && (!activeImagePath || activeImagePath.trim().length === 0)) {
+      throw new Error('No input image selected for model node')
+    }
     const base64 = selectedImageData && nodeInputPath === undefined
       ? selectedImageData
-      : await window.electron.fs.readFileBase64(activeImagePath)
+      : await window.electron.fs.readFileBase64(activeImagePath as string)
     const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0))
     const blob  = new Blob([bytes], { type: 'image/png' })
-    const fname = activeImagePath.split(/[\\/]/).pop() ?? 'image.png'
+    const fname = activeImagePath?.split(/[\\/]/).pop() ?? 'image.png'
 
     const extraParams: Record<string, unknown> = {}
     if (nodeInputMeshPath) {
@@ -386,7 +389,7 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
       const branchSteps = waitIds.reduce((acc, w) => acc + (branches.get(w)?.length ?? 0), 0)
       const totalSteps  = preExecExtNodes.length + branchSteps
 
-      const selectedImagePath = appState.selectedImagePath ?? ''
+      const selectedImagePath = appState.selectedImagePath ?? undefined
       const selectedImageData = overrideImageData ?? appState.selectedImageData ?? undefined
       const currentMeshUrl    = appState.currentJob?.outputUrl
 
@@ -404,7 +407,7 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
 
       appState.setCurrentJob({
         id:        crypto.randomUUID(),
-        imageFile: selectedImagePath,
+        imageFile: selectedImagePath ?? '__workflow__',
         status:    'generating',
         progress:  0,
         createdAt: Date.now(),

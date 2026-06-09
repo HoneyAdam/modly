@@ -27,6 +27,7 @@ export interface ModelExtension {
   trusted:      boolean
   builtin:      boolean
   source?:      string
+  localPath?:   string
   nodes:        ExtensionNode[]
 }
 
@@ -53,6 +54,7 @@ export interface ProcessExtension {
   trusted:      boolean
   builtin:      boolean
   source?:      string
+  localPath?:   string
   entry:        string
   nodes:        ExtensionNode[]
 }
@@ -118,6 +120,9 @@ declare global {
         minimize: () => void
         maximize: () => void
         close:    () => void
+      }
+      ui: {
+        setZoomFactor: (factor: number) => void
       }
       python: {
         start:     () => Promise<{ success: boolean; port?: number; error?: string }>
@@ -232,8 +237,17 @@ declare global {
         installFromGitHub: (url: string) => Promise<{
           success:      boolean
           error?:       string
+          cancelled?:   boolean
           extensionId?: string
           extension?:   AnyExtension
+        }>
+        installFromLocal:  () => Promise<{
+          success:      boolean
+          error?:       string
+          cancelled?:   boolean
+          extensionId?: string
+          extension?:   AnyExtension
+          localPath?:   string
         }>
         uninstall:   (extensionId: string) => Promise<{ success: boolean; error?: string }>
         repair:      (extensionId: string) => Promise<{ success: boolean; error?: string }>
