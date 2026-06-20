@@ -554,6 +554,8 @@ export default function GeneratePage(): JSX.Element {
   const [libraryCollapsedSectionKeys, setLibraryCollapsedSectionKeys] = useState<string[]>(() => getDefaultAssetLibraryCollapsedSectionKeys())
   const [gizmoMode, setGizmoMode] = useState<'translate' | 'rotate' | 'scale' | null>(null)
   const dragging = useRef(false)
+  // Populated by Viewer3D — undoes the latest live gizmo transform, if any.
+  const gizmoUndoRef = useRef<(() => boolean) | null>(null)
 
   const lightSettings = useAppStore((s) => s.lightSettings)
   const setLightSettings = useAppStore((s) => s.setLightSettings)
@@ -578,7 +580,7 @@ export default function GeneratePage(): JSX.Element {
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (!e.ctrlKey && !e.metaKey) return
-      if (e.key === 'z') { e.preventDefault(); undoMesh() }
+      if (e.key === 'z') { e.preventDefault(); if (gizmoUndoRef.current?.()) return; undoMesh() }
       if (e.key === 'y') { e.preventDefault(); redoMesh() }
     }
     window.addEventListener('keydown', handler)
@@ -592,6 +594,22 @@ export default function GeneratePage(): JSX.Element {
   useEffect(() => {
     if (!meshSelected) setGizmoMode(null)
   }, [meshSelected])
+
+  // Gizmo hotkeys: W move, R rotate, S scale, Esc exits. Ignored while typing.
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      const el = document.activeElement as HTMLElement | null
+      if (el && (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el.isContentEditable)) return
+      if (e.key === 'Escape') { setGizmoMode((m) => (m ? null : m)); return }
+      if (!hasModel || !meshSelected) return
+      const k = e.key.toLowerCase()
+      if (k === 'w') setGizmoMode('translate')
+      else if (k === 'r') setGizmoMode('rotate')
+      else if (k === 's') setGizmoMode('scale')
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [hasModel, meshSelected])
 
   useEffect(() => {
     if (openPanel !== 'library' || libraryLoaded || libraryLoading) return
@@ -1082,7 +1100,7 @@ export default function GeneratePage(): JSX.Element {
 
         {/* Viewer area */}
         <div className="flex-1 relative overflow-hidden">
-          <Viewer3D lightSettings={lightSettings} />
+          <Viewer3D lightSettings={lightSettings} gizmoMode={gizmoMode} gizmoUndoRef={gizmoUndoRef} />
           <GenerationHUD />
         </div>
       </div>
