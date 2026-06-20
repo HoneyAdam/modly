@@ -215,6 +215,27 @@ function LightPopover({
     )
   }
 
+  function plainRow(label: string, intensityKey: keyof LightSettings, max: number) {
+    const value = (settings[intensityKey] as number) ?? (DEFAULT_LIGHT_SETTINGS[intensityKey] as number)
+    return (
+      <div className="flex flex-col gap-1.5">
+        <div className="flex items-center gap-2">
+          <span className="text-[10px] text-zinc-400 flex-1">{label}</span>
+          <span className="text-[10px] text-zinc-500 font-mono">{value.toFixed(2)}</span>
+        </div>
+        <input
+          type="range"
+          min={0}
+          max={max}
+          step={0.05}
+          value={value}
+          onChange={(e) => onChange({ ...settings, [intensityKey]: parseFloat(e.target.value) })}
+          className="w-full h-1.5 accent-violet-500 cursor-pointer"
+        />
+      </div>
+    )
+  }
+
   return (
     <div className="absolute top-full right-0 mt-1 z-50 bg-zinc-900 border border-zinc-700/60 rounded-xl p-3 flex flex-col gap-3 min-w-[220px] shadow-xl">
       <div className="flex items-center justify-between">
@@ -228,6 +249,9 @@ function LightPopover({
       </div>
       {lightRow('Sun', 'mainColor', 'mainIntensity', 4)}
       {lightRow('Fill', 'fillColor', 'fillIntensity', 2)}
+      {plainRow('Ambient', 'ambientIntensity', 1.5)}
+      {plainRow('Exposure', 'exposure', 3)}
+      {plainRow('Environment', 'envIntensity', 2)}
       <button
         onClick={onClose}
         className="mt-1 px-3 py-1.5 text-xs text-zinc-400 hover:text-zinc-200 bg-zinc-800 hover:bg-zinc-700 rounded-lg transition-colors"
