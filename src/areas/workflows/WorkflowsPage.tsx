@@ -14,7 +14,7 @@ import {
   type Edge,
   type OnConnectStartParams,
 } from '@xyflow/react'
-import { useWorkflowsStore } from '@shared/stores/workflowsStore'
+import { useWorkflowsStore, NODE_TYPES_WITHOUT_TARGET, NODE_TYPES_WITHOUT_SOURCE } from '@shared/stores/workflowsStore'
 import { useExtensionsStore } from '@shared/stores/extensionsStore'
 import { useNavStore } from '@shared/stores/navStore'
 import { useAppStore } from '@shared/stores/appStore'
@@ -41,6 +41,18 @@ const NODE_TYPES = { extensionNode: ExtensionNode, imageNode: ImageNode, textNod
 const EDGE_TYPES = { workflowEdge: WorkflowEdge }
 
 const DEFAULT_EDGE_OPTS = { type: 'workflowEdge' }
+
+// The While container whose bounds contain a flow-space point, if any. Used to
+// auto-parent nodes dropped (or created) inside a While so they join its loop body.
+function findWhileContainerAt(nodes: Node[], pos: { x: number; y: number }): Node | undefined {
+  return nodes.find((n) => {
+    if (n.type !== 'whileNode') return false
+    const gw = (n.measured?.width  ?? n.width  ?? (n.style?.width  as number)) || 0
+    const gh = (n.measured?.height ?? n.height ?? (n.style?.height as number)) || 0
+    return pos.x >= n.position.x && pos.x <= n.position.x + gw
+        && pos.y >= n.position.y && pos.y <= n.position.y + gh
+  })
+}
 
 // ─── IO badge ─────────────────────────────────────────────────────────────────
 
@@ -908,9 +920,22 @@ function WorkflowCanvasInner({
   const isValidConnection = useCallback((connection: Connection) => {
     const srcType = getNodeOutputType(getNode(connection.source) as Node, allExtensions)
     const tgtType = getNodeInputType(getNode(connection.target) as Node, connection.targetHandle, allExtensions)
-    if (!srcType || !tgtType) return true  // unknown type — allow
-    return srcType === tgtType
-  }, [getNode, allExtensions])
+    if (srcType && tgtType && srcType !== tgtType) return false  // type mismatch (unknown types allowed)
+    // Reject connections that would create a cycle: if the target can already
+    // reach the source, adding source→target closes a loop.
+    if (connection.source && connection.target) {
+      const stack = [connection.target]
+      const seen  = new Set<string>()
+      while (stack.length > 0) {
+        const id = stack.pop()!
+        if (id === connection.source) return false
+        if (seen.has(id)) continue
+        seen.add(id)
+        for (const e of edges) if (e.source === id) stack.push(e.target)
+      }
+    }
+    return true
+  }, [getNode, allExtensions, edges])
 
   const onConnectStart = useCallback((_: React.MouseEvent | React.TouchEvent, params: OnConnectStartParams) => {
     pendingConnectionRef.current  = params
@@ -927,9 +952,13 @@ function WorkflowCanvasInner({
       pendingConnectionRef.current = null
       return
     }
-    // Dropped on empty canvas (not on a handle or node body)
+    // Dropped on empty canvas — or inside a While body — opens the palette. The
+    // While is a giant node, so don't treat its empty body as "dropped on a node";
+    // bail only on a real node or a handle.
     const target = event.target as Element
-    if (target.closest('.react-flow__node') || target.closest('.react-flow__handle')) {
+    const nodeEl = target.closest('.react-flow__node')
+    const onWhile = nodeEl?.classList.contains('react-flow__node-whileNode') ?? false
+    if (target.closest('.react-flow__handle') || (nodeEl && !onWhile)) {
       pendingConnectionRef.current = null
       return
     }
@@ -949,19 +978,34 @@ function WorkflowCanvasInner({
 
     const nodeType = e.dataTransfer.getData(DRAG_NODE_KEY)
     if (nodeType) {
-      setNodes((nds) => [...nds, {
-        id: newId(), type: nodeType, position,
-        data: { enabled: true, params: {} } as WFNodeData,
-      }])
+      const isContainer = nodeType === 'whileNode'
+      setNodes((nds) => {
+        const parent = isContainer ? undefined : findWhileContainerAt(nds, position)
+        const node: Node = {
+          id: newId(), type: nodeType,
+          position: parent ? { x: position.x - parent.position.x, y: position.y - parent.position.y } : position,
+          data: { enabled: true, params: {} } as WFNodeData,
+          ...(isContainer ? { style: { width: 420, height: 240 }, width: 420, height: 240 } : {}),
+          ...(parent ? { parentId: parent.id } : {}),
+        }
+        // Containers must sit before their future children in the array → prepend.
+        return isContainer ? [node, ...nds] : [...nds, node]
+      })
       return
     }
 
     const extensionId = e.dataTransfer.getData(DRAG_KEY)
     if (!extensionId) return
-    setNodes((nds) => [...nds, {
-      id: newId(), type: 'extensionNode', position,
-      data: { extensionId, enabled: true, params: {} } as WFNodeData,
-    }])
+    setNodes((nds) => {
+      const parent = findWhileContainerAt(nds, position)
+      const node: Node = {
+        id: newId(), type: 'extensionNode',
+        position: parent ? { x: position.x - parent.position.x, y: position.y - parent.position.y } : position,
+        data: { extensionId, enabled: true, params: {} } as WFNodeData,
+        ...(parent ? { parentId: parent.id } : {}),
+      }
+      return [...nds, node]
+    })
   }, [screenToFlowPosition, setNodes])
 
   // Keyboard shortcuts (Space, Ctrl+Z, Ctrl+Y / Ctrl+Shift+Z)
@@ -995,23 +1039,36 @@ function WorkflowCanvasInner({
     const newNodeId = newId()
     const isContainer = type === 'whileNode'
     setNodes((nds) => {
+      const parent = isContainer ? undefined : findWhileContainerAt(nds, position)
       const node: Node = {
-        id: newNodeId, type, position,
+        id: newNodeId, type,
+        position: parent ? { x: position.x - parent.position.x, y: position.y - parent.position.y } : position,
         data: { extensionId, enabled: true, params: {} } as WFNodeData,
         ...(isContainer ? { style: { width: 420, height: 240 }, width: 420, height: 240 } : {}),
+        ...(parent ? { parentId: parent.id } : {}),
       }
       // Containers must sit before their future children in the array → prepend.
       return isContainer ? [node, ...nds] : [...nds, node]
     })
 
-    // If palette was opened from a connection drag, wire the edge automatically
+    // If palette was opened from a connection drag, wire the edge automatically.
+    // ExtensionNodes use id'd handles (input-0 / output), not the default null
+    // handle, so the new node's side must reference them or React Flow can't place
+    // the edge ("Couldn't create edge for target handle id: null").
     const pending = pendingConnectionRef.current
     if (pending?.nodeId) {
       const isSource = pending.handleType === 'source'
-      const edge = isSource
-        ? { id: newId(), source: pending.nodeId, sourceHandle: pending.handleId ?? undefined, target: newNodeId }
-        : { id: newId(), source: newNodeId, target: pending.nodeId, targetHandle: pending.handleId ?? undefined }
-      setEdges((eds) => addEdge({ ...edge, ...DEFAULT_EDGE_OPTS }, eds))
+      const isExt = type === 'extensionNode'
+      // Skip wiring when the new node can't take the connection: a source-only node
+      // (Image/Text/Mesh) as target, or a sink-only node (Add to Scene/Preview) as
+      // source — those have no matching handle and would orphan the edge.
+      const canWire = isSource ? !NODE_TYPES_WITHOUT_TARGET.has(type) : !NODE_TYPES_WITHOUT_SOURCE.has(type)
+      if (canWire) {
+        const edge = isSource
+          ? { id: newId(), source: pending.nodeId, sourceHandle: pending.handleId ?? undefined, target: newNodeId, targetHandle: isExt ? 'input-0' : undefined }
+          : { id: newId(), source: newNodeId, sourceHandle: isExt ? 'output' : undefined, target: pending.nodeId, targetHandle: pending.handleId ?? undefined }
+        setEdges((eds) => addEdge({ ...edge, ...DEFAULT_EDGE_OPTS }, eds))
+      }
     }
 
     pendingConnectionRef.current = null

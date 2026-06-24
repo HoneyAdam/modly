@@ -37,6 +37,15 @@ export interface GenerationOptions {
   modelParams: Record<string, any>
 }
 
+export interface LightSettings {
+  mainIntensity: number
+  mainColor: string
+  fillIntensity: number
+  fillColor: string
+  ambientIntensity: number
+  envIntensity: number
+}
+
 export interface AppToast {
   id: number
   message: string
@@ -49,6 +58,19 @@ const DEFAULT_OPTIONS: GenerationOptions = {
   enableTexture: false,
   textureResolution: 512,
   modelParams: {},
+}
+
+export const DEFAULT_LIGHT_SETTINGS: LightSettings = {
+  // Matches the offline debug renderer's flat studio rig: two soft directional
+  // lights (key ~0.8 / fill ~0.35) + high ambient (0.45) that lifts dark albedo
+  // (black cat) out of "void" shadows, NO IBL (envIntensity 0).
+  // All live-adjustable from the Lighting popover (Reset returns here).
+  mainIntensity: 0.8,
+  mainColor: '#ffffff',
+  fillIntensity: 0.35,
+  fillColor: '#ffffff',
+  ambientIntensity: 0.45,
+  envIntensity: 0.0,
 }
 
 interface AppState {
@@ -121,6 +143,10 @@ interface AppState {
   setUseAtkinsonFont: (v: boolean) => void
   uiScale: UiScale
   setUiScale: (v: UiScale) => void
+
+  // 3D viewer lighting
+  lightSettings: LightSettings
+  setLightSettings: (settings: LightSettings) => void
 
   // Actions
   initApp: () => Promise<void>
@@ -221,6 +247,9 @@ export const useAppStore = create<AppState>()(
       uiScale: 'medium',
       setUiScale: (v) => set({ uiScale: v }),
 
+      lightSettings: DEFAULT_LIGHT_SETTINGS,
+      setLightSettings: (settings) => set({ lightSettings: settings }),
+
       currentJob: null,
       selectedImagePath: null,
       setSelectedImagePath: (path) => set({ selectedImagePath: path }),
@@ -274,6 +303,7 @@ export const useAppStore = create<AppState>()(
         showRamIndicator: state.showRamIndicator,
         useAtkinsonFont: state.useAtkinsonFont,
         uiScale: state.uiScale,
+        lightSettings: state.lightSettings,
       }),
     }
   )

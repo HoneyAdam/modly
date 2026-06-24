@@ -9,10 +9,13 @@ export default function WhileNode({ id, data, selected }: { id: string; data: WF
   const { updateNodeData, deleteElements } = useReactFlow()
   const status       = useWorkflowRunStore((s) => s.runState.status)
   const activeNodeId = useWorkflowRunStore((s) => s.activeNodeId)
-  const continueRun  = useWorkflowRunStore((s) => s.continueRun)
-  const retryRun     = useWorkflowRunStore((s) => s.retryRun)
+  const continueWhile = useWorkflowRunStore((s) => s.continueWhile)
+  const retryWhile    = useWorkflowRunStore((s) => s.retryWhile)
+  const progress     = useWorkflowRunStore((s) => s.whileProgress[id])
   const isPaused     = status === 'paused' && activeNodeId === id
   const isRunning    = status === 'running' && activeNodeId === id
+  // Lock the iteration count while a run is active so it can't change mid-loop.
+  const locked       = status === 'running' || status === 'paused'
 
   return (
     <div
@@ -45,11 +48,17 @@ export default function WhileNode({ id, data, selected }: { id: string; data: WF
           <input
             type="number" min={0}
             value={data.iterations ?? 0}
+            disabled={locked}
             onChange={(e) => updateNodeData(id, { iterations: Math.max(0, Number(e.target.value) || 0) })}
             onPointerDown={(e) => e.stopPropagation()}
-            className="nodrag w-11 px-1 py-0.5 bg-zinc-900/80 border border-amber-500/30 rounded text-amber-200 text-center outline-none focus:border-amber-500"
+            className={`nodrag w-11 px-1 py-0.5 bg-zinc-900/80 border border-amber-500/30 rounded text-amber-200 text-center outline-none focus:border-amber-500 ${locked ? 'opacity-50 cursor-not-allowed' : ''}`}
           />
           <span>×</span>
+          {progress && (
+            <span className="ml-1 px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-200 tabular-nums">
+              {progress.total != null ? `${progress.current}/${progress.total}` : progress.current}
+            </span>
+          )}
         </label>
 
         <div className="flex-1" />
@@ -58,14 +67,14 @@ export default function WhileNode({ id, data, selected }: { id: string; data: WF
         {isPaused && (
           <div className="nodrag flex items-center gap-1">
             <button
-              onClick={continueRun}
+              onClick={continueWhile}
               className="flex items-center gap-1 px-2 py-1 rounded bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/30 transition-colors text-[9px] font-medium"
             >
               <svg width="8" height="8" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
               Continue
             </button>
             <button
-              onClick={retryRun}
+              onClick={retryWhile}
               className="flex items-center gap-1 px-2 py-1 rounded bg-amber-500/20 border border-amber-500/40 text-amber-300 hover:bg-amber-500/30 transition-colors text-[9px] font-medium"
             >
               <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">

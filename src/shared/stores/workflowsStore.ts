@@ -35,10 +35,38 @@ interface LegacyWorkflow {
   updatedAt:   string
 }
 
+// Source-only nodes have no target handle; sink-only nodes have no source handle.
+// An edge into/out of the wrong side can't resolve a handle and makes React Flow
+// warn ("Couldn't create edge for target handle id: null") on every render.
+export const NODE_TYPES_WITHOUT_TARGET = new Set(['imageNode', 'textNode', 'meshNode', 'inputNode'])
+export const NODE_TYPES_WITHOUT_SOURCE = new Set(['outputNode', 'previewNode'])
+
+function sanitizeEdges(nodes: WFNode[], edges: WFEdge[]): WFEdge[] {
+  const typeOf = new Map(nodes.map((n) => [n.id, n.type]))
+  return edges
+    .filter((e) => {
+      const source = typeOf.get(e.source)
+      const target = typeOf.get(e.target)
+      if (!source || !target) return false                  // dangling endpoint
+      if (NODE_TYPES_WITHOUT_TARGET.has(target)) return false // target can't receive
+      if (NODE_TYPES_WITHOUT_SOURCE.has(source)) return false // source can't emit
+      return true
+    })
+    .map((e) => {
+      // ExtensionNodes use id'd handles (input-0 / output). Repair edges that lost
+      // them (e.g. older palette auto-wiring) so React Flow can place them instead
+      // of warning "Couldn't create edge for target handle id: null".
+      const patch: Partial<WFEdge> = {}
+      if (typeOf.get(e.target) === 'extensionNode' && e.targetHandle == null) patch.targetHandle = 'input-0'
+      if (typeOf.get(e.source) === 'extensionNode' && e.sourceHandle == null) patch.sourceHandle = 'output'
+      return Object.keys(patch).length ? { ...e, ...patch } : e
+    })
+}
+
 function migrateWorkflow(raw: LegacyWorkflow): Workflow {
   // Already migrated
   if (raw.nodes && raw.edges) {
-    return { ...raw, nodes: raw.nodes, edges: raw.edges } as Workflow
+    return { ...raw, nodes: raw.nodes, edges: sanitizeEdges(raw.nodes, raw.edges) } as Workflow
   }
 
   // Migrate from old blocks format
