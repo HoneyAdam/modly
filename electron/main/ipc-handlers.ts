@@ -1093,7 +1093,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
   })
 
   // Install a local extension by creating a symlink/junction to a local folder
-  ipcMain.handle('extensions:installFromLocal', async (event) => {
+  ipcMain.handle('extensions:installFromLocal', async () => {
     const win  = getWindow()
     const emit = (data: object) => win?.webContents.send('extensions:installProgress', data)
 

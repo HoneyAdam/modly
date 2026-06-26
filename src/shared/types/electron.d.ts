@@ -88,6 +88,8 @@ export interface WFNodeData {
   enabled:         boolean
   showInGenerate?: boolean
   params:          Record<string, unknown>
+  // React Flow requires node data to satisfy Record<string, unknown>.
+  [key: string]:   unknown
 }
 
 export interface WFNode {
@@ -165,6 +167,7 @@ declare global {
       model: {
         export:         (args: { outputUrl: string; format: string }) => Promise<{ success: boolean; error?: string }>
         listDownloaded: () => Promise<{ id: string; name: string; size_gb: number }[]>
+        activeDownloads: () => Promise<{ modelId: string; percent: number; file?: string; fileIndex?: number; totalFiles?: number }[]>
         isDownloaded:   (modelId: string, downloadCheck?: string) => Promise<boolean>
         download:       (repoId: string, modelId: string, skipPrefixes?: string[], includePrefixes?: string[]) => Promise<{ success: boolean; error?: string }>
         pauseDownload:  (modelId: string) => Promise<{ success: boolean; error?: string }>

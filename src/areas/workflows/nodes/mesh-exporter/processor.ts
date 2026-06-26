@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-require-imports */
 import path = require('path')
 import fs   = require('fs')
 
