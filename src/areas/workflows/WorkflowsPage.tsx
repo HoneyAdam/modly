@@ -43,13 +43,14 @@ const DEFAULT_EDGE_OPTS = { type: 'workflowEdge' }
 
 // ─── IO badge ─────────────────────────────────────────────────────────────────
 
-const IO_STYLES: Record<'image' | 'text' | 'mesh', string> = {
+const IO_STYLES: Record<'image' | 'text' | 'mesh' | 'audio', string> = {
+  audio: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/25',
   image: 'bg-sky-500/15 text-sky-400 border-sky-500/25',
   mesh:  'bg-violet-500/15 text-violet-400 border-violet-500/25',
   text:  'bg-amber-500/15 text-amber-400 border-amber-500/25',
 }
 
-function IoBadge({ type }: { type: 'image' | 'text' | 'mesh' }) {
+function IoBadge({ type }: { type: 'image' | 'text' | 'mesh' | 'audio' }) {
   return (
     <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-medium border ${IO_STYLES[type]}`}>
       {type}

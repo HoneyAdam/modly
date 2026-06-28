@@ -32,6 +32,16 @@ const _activeJobId = { current: null as string | null }
 
 interface NodeOutput { filePath?: string; text?: string; outputType?: string }
 
+function isSceneMeshOutput(output: NodeOutput | undefined): output is NodeOutput & { filePath: string } {
+  return output?.outputType === 'mesh' && typeof output.filePath === 'string'
+}
+
+function toWorkspaceUrl(filePath: string, workspaceDir: string): string | undefined {
+  const norm = filePath.replace(/\\/g, '/')
+  if (!norm.startsWith(workspaceDir)) return undefined
+  return `/workspace/${norm.slice(workspaceDir.length).replace(/^\//, '')}`
+}
+
 interface RunContext {
   workflow:           Workflow
   allExtensions:      WorkflowExtension[]
@@ -244,6 +254,7 @@ async function executeExtensionNode(
   } else {
     if (ext?.input === 'mesh'  && !nodeInputPath) throw new Error(`${ext.name} needs an incoming mesh connection`)
     if (ext?.input === 'image' && !nodeInputPath) throw new Error(`${ext.name} needs an incoming image connection`)
+    if (ext?.input === 'audio' && !nodeInputPath) throw new Error(`${ext.name} needs an incoming audio connection`)
     if (ext?.input === 'text'  && !nodeInputText) throw new Error(`${ext.name} needs an incoming text connection`)
 
     const parts  = (node.data.extensionId ?? '').split('/')
@@ -263,9 +274,9 @@ async function executeExtensionNode(
   const outputType = ext?.output ?? (nodeInputPath ? 'mesh' : undefined)
   nodeOutputs.set(node.id, { filePath: nodeInputPath, text: nodeInputText, outputType })
 
-  const norm = nodeInputPath?.replace(/\\/g, '/')
-  if (norm?.startsWith(workspaceDir) && reachesSceneOutput(node.id, workflow.edges, nodeMap)) {
-    const url = `/workspace/${norm.slice(workspaceDir.length).replace(/^\//, '')}`
+  const output = nodeOutputs.get(node.id)
+  const url = isSceneMeshOutput(output) ? toWorkspaceUrl(output.filePath, workspaceDir) : undefined
+  if (url && reachesSceneOutput(node.id, workflow.edges, nodeMap)) {
     ctx.lastSceneMesh = url   // remember it so finalize() keeps the last-run branch in view
     useAppStore.getState().updateCurrentJob({ status: 'done', progress: 100, outputUrl: url })
   }
@@ -302,9 +313,9 @@ function pushBranchSceneMesh(ctx: RunContext, waitId: string): void {
     const inEdge = ctx.workflow.edges.find((e) => e.target === node.id)
     if (!inEdge) continue
     const srcId = resolveDataSource(inEdge.source, ctx.workflow.edges, ctx.nodeMap)
-    const fp = srcId ? ctx.nodeOutputs.get(srcId)?.filePath?.replace(/\\/g, '/') : undefined
-    if (fp && fp.startsWith(ctx.workspaceDir)) {
-      const url = `/workspace/${fp.slice(ctx.workspaceDir.length).replace(/^\//, '')}`
+    const sourceOutput = srcId ? ctx.nodeOutputs.get(srcId) : undefined
+    const url = isSceneMeshOutput(sourceOutput) ? toWorkspaceUrl(sourceOutput.filePath, ctx.workspaceDir) : undefined
+    if (url) {
       ctx.lastSceneMesh = url
       useAppStore.getState().updateCurrentJob({ status: 'done', progress: 100, outputUrl: url })
     }
@@ -355,23 +366,21 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
     if (lastOutputNode) {
       for (const edge of ctx.workflow.edges.filter((e) => e.target === lastOutputNode.id)) {
         const src = ctx.nodeOutputs.get(edge.source)
-        if (src?.filePath) {
-          const norm = src.filePath.replace(/\\/g, '/')
-          if (norm.startsWith(ctx.workspaceDir)) {
-            outputUrl = `/workspace/${norm.slice(ctx.workspaceDir.length).replace(/^\//, '')}`
-          }
+        if (isSceneMeshOutput(src)) {
+          outputUrl = toWorkspaceUrl(src.filePath, ctx.workspaceDir)
         }
       }
     }
     if (!outputUrl) {
       for (const [, o] of ctx.nodeOutputs) {
         if (o.filePath) {
-          const norm = o.filePath.replace(/\\/g, '/')
-          if (norm.startsWith(ctx.workspaceDir)) {
-            outputUrl = `/workspace/${norm.slice(ctx.workspaceDir.length).replace(/^\//, '')}`
-          } else {
+          if (o.outputType === 'audio') {
             outputPath = o.filePath
+            continue
           }
+          const workspaceUrl = toWorkspaceUrl(o.filePath, ctx.workspaceDir)
+          if (workspaceUrl) outputUrl = workspaceUrl
+          else outputPath = o.filePath
         }
       }
     }

@@ -14,9 +14,9 @@ import type {
 export interface ExtensionNode {
   id:               string
   name:             string
-  input:            'image' | 'text' | 'mesh'
-  inputs?:          ('image' | 'text' | 'mesh')[]   // multi-input nodes; overrides input when set
-  output:           'image' | 'text' | 'mesh'
+  input:            'image' | 'text' | 'mesh' | 'audio'
+  inputs?:          ('image' | 'text' | 'mesh' | 'audio')[]   // multi-input nodes; overrides input when set
+  output:           'image' | 'text' | 'mesh' | 'audio'
   paramsSchema:     ParamSchema[]
   paramDefaults?:   Record<string, number | string>
   hfRepo?:          string

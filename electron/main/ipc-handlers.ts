@@ -754,9 +754,9 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     nodes?: {
       id:                string
       name?:             string
-      input?:            'mesh' | 'image' | 'text'
-      inputs?:           ('mesh' | 'image' | 'text')[]
-      output?:           'mesh' | 'image' | 'text'
+      input?:            'mesh' | 'image' | 'text' | 'audio'
+      inputs?:           ('mesh' | 'image' | 'text' | 'audio')[]
+      output?:           'mesh' | 'image' | 'text' | 'audio'
       params_schema?:    unknown[]
       param_defaults?:   Record<string, unknown>
       hf_repo?:          string
