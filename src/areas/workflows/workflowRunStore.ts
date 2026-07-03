@@ -29,6 +29,18 @@ const IDLE: WorkflowRunState = {
 
 const _cancel      = { current: false }
 const _activeJobId = { current: null as string | null }
+// While container (manual mode) pause/resume — set by continueWhile()/retryWhile().
+const _resume      = { current: null as (() => void) | null }
+const _retry       = { current: false }
+// Live node params — the UI pushes edits here so a looping/paused run re-reads the
+// latest values when a body node starts (instead of the snapshot from run start).
+const _liveParams  = { current: new Map<string, Record<string, unknown>>() }
+
+function flushResume(): void {
+  const fn = _resume.current
+  _resume.current = null
+  if (fn) fn()
+}
 
 interface NodeOutput { filePath?: string; text?: string; outputType?: string }
 
@@ -83,6 +95,38 @@ function topoSort(nodes: WFNode[], edges: WFEdge[]): WFNode[] {
   for (const node of nodes) if ((inDeg.get(node.id) ?? 0) === 0) visit(node.id)
   for (const node of nodes) if (!visited.has(node.id)) visit(node.id)
   return result
+}
+
+// ─── While container geometry ──────────────────────────────────────────────────
+// Body membership can't rely on parentId alone: React Flow only assigns it when a
+// node is dragged into the container, so a While resized around existing nodes (or
+// nodes added by palette click) leaves them unparented. We therefore also test
+// on-canvas containment at run time.
+
+interface WhileBounds { x: number; y: number; w: number; h: number }
+
+function nodeSize(n: WFNode): { w: number; h: number } {
+  const measured = (n as { measured?: { width?: number; height?: number } }).measured
+  const styleW = n.style?.width
+  const styleH = n.style?.height
+  return {
+    w: measured?.width  ?? n.width  ?? (typeof styleW === 'number' ? styleW : 200),
+    h: measured?.height ?? n.height ?? (typeof styleH === 'number' ? styleH : 80),
+  }
+}
+
+function whileBounds(w: WFNode): WhileBounds {
+  const s = nodeSize(w)
+  return { x: w.position.x, y: w.position.y, w: s.w, h: s.h }
+}
+
+function isInsideWhile(n: WFNode, whileId: string, b: WhileBounds): boolean {
+  if (n.parentId === whileId) return true
+  if (n.parentId) return false   // explicit child of another container
+  const s = nodeSize(n)
+  const cx = n.position.x + s.w / 2
+  const cy = n.position.y + s.h / 2
+  return cx >= b.x && cx <= b.x + b.w && cy >= b.y && cy <= b.y + b.h
 }
 
 // ─── Branch identification ────────────────────────────────────────────────────
@@ -144,6 +188,9 @@ async function executeExtensionNode(
           selectedImagePath, selectedImageData } = ctx
 
   const ext = getWorkflowExtension(node.data.extensionId ?? '', allExtensions)
+  // Freshest params at the moment the node starts (so loop iterations / Retry pick
+  // up edits made while paused, not the values captured at run start).
+  const liveParams = _liveParams.current.get(node.id) ?? node.data.params ?? {}
 
   const resolveSource = (sourceId: string): NodeOutput | undefined => {
     const realId = resolveDataSource(sourceId, workflow.edges, nodeMap)
@@ -198,7 +245,7 @@ async function executeExtensionNode(
     const schemaDefaults = Object.fromEntries(
       (ext.params ?? []).map((p) => [p.id, p.default]),
     )
-    const effectiveParams = { ...schemaDefaults, ...(node.data.params ?? {}) }
+    const effectiveParams = { ...schemaDefaults, ...liveParams }
 
     const fd = new FormData()
     fd.append('image', blob, fname)
@@ -252,7 +299,7 @@ async function executeExtensionNode(
     const result = await window.electron.extensions.runProcess(
       extId,
       { filePath: nodeInputPath, text: nodeInputText, nodeId: nid },
-      node.data.params as Record<string, unknown>,
+      liveParams as Record<string, unknown>,
     )
     if (!result.success) throw new Error(result.error ?? 'Process extension failed')
     nodeInputPath = result.result?.filePath ?? nodeInputPath
@@ -320,11 +367,19 @@ interface WorkflowRunStore {
   nodeImageOutputs: Record<string, string>
   waitStates:       Record<string, WaitState>
   runningBranchId:  string | null
+  /** whileId → current iteration / total (total null = manual/unbounded) */
+  whileProgress:    Record<string, { current: number; total: number | null }>
 
   run:         (workflow: Workflow, allExtensions: WorkflowExtension[], overrideImageData?: string) => Promise<void>
   cancel:      () => void
   reset:       () => void
   continueRun: (waitId: string) => Promise<void>
+  /** While container: resume past the loop (Continue) */
+  continueWhile: () => void
+  /** While container: resume and re-run the loop body once more (Retry) */
+  retryWhile:    () => void
+  /** UI → runner: push the latest params for a node so a looping run uses them */
+  setLiveNodeParams: (nodeId: string, params: Record<string, unknown>) => void
 }
 
 export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
@@ -379,6 +434,7 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
     set((s) => ({
       activeNodeId:     null,
       runningBranchId:  null,
+      whileProgress:    {},
       waitStates:       finalWaitStates ?? s.waitStates,
       nodeImageOutputs: collectImageOutputs(ctx),
       runState: {
@@ -401,16 +457,50 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
     nodeImageOutputs: {},
     waitStates:       {},
     runningBranchId:  null,
+    whileProgress:    {},
 
     async run(workflow, allExtensions, overrideImageData?) {
       _cancel.current = false
+      // Seed live params from the snapshot; UI edits during the run override these.
+      _liveParams.current = new Map(workflow.nodes.map((n) => [n.id, { ...(n.data.params ?? {}) }]))
 
       const appState = useAppStore.getState()
       const apiUrl   = appState.apiUrl
 
       const { preExecExtNodes, branches, waitIds, parentWait, ordered } = identifyBranches(workflow)
       const branchSteps = waitIds.reduce((acc, w) => acc + (branches.get(w)?.length ?? 0), 0)
-      const totalSteps  = preExecExtNodes.length + branchSteps
+
+      // ── While containers → loop over their pre-phase body members ─────────────
+      // A While's body = the extension nodes parented to it (parentId). They run in
+      // the pre-phase; we re-run those members either N times (data.iterations) or,
+      // in manual mode, on Continue/Retry. The body need not be contiguous in topo
+      // order, so re-runs filter by parentId (not an index range) to avoid replaying
+      // unrelated pre-phase nodes that happen to sort between body members. Body
+      // nodes gated behind a Wait land in a branch instead and are out of scope.
+      interface LoopInfo { whileId: string; firstIdx: number; lastIdx: number; bodyIds: Set<string>; iterations: number | null }
+      const loops: LoopInfo[] = []
+      for (const w of workflow.nodes) {
+        if (w.type !== 'whileNode') continue
+        const bounds = whileBounds(w)
+        const idxs = preExecExtNodes.reduce<number[]>((acc, n, idx) => {
+          if (isInsideWhile(n, w.id, bounds)) acc.push(idx)
+          return acc
+        }, [])
+        if (idxs.length === 0) continue
+        const iters = Number(w.data?.iterations)
+        loops.push({
+          whileId:    w.id,
+          firstIdx:   Math.min(...idxs),
+          lastIdx:    Math.max(...idxs),
+          bodyIds:    new Set(idxs.map((i) => preExecExtNodes[i].id)),
+          iterations: Number.isFinite(iters) && iters > 0 ? Math.floor(iters) : null,
+        })
+      }
+      const loopCounters = new Map(loops.map((l) => [l.whileId, l.iterations]))
+      // Auto-mode loops replay their body N times; count the extra passes so the
+      // progress total reflects the real work (manual loops stay unbounded).
+      const loopExtraSteps = loops.reduce((acc, l) => acc + (l.iterations != null ? (l.iterations - 1) * l.bodyIds.size : 0), 0)
+      const totalSteps = preExecExtNodes.length + branchSteps + loopExtraSteps
 
       const selectedImagePath = appState.selectedImagePath ?? undefined
       const selectedImageData = overrideImageData ?? appState.selectedImageData ?? undefined
@@ -422,6 +512,7 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
         // Top-level Waits are pending; nested Waits start blocked until their parent finishes.
         waitStates:       Object.fromEntries(waitIds.map((id) => [id, parentWait.get(id) ? 'blocked' as WaitState : 'pending' as WaitState])),
         runningBranchId:  null,
+        whileProgress:    Object.fromEntries(loops.map((l) => [l.whileId, { current: 1, total: l.iterations }])),
         runState: {
           status: 'running', blockIndex: 0, blockTotal: totalSteps,
           blockProgress: 0, blockStep: 'Starting…',
@@ -482,15 +573,73 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
         }
         _ctx.current = ctx
 
+        // While the runner is replaying a loop body, this holds the active While id;
+        // re-iterations then execute only that While's members and skip everything
+        // else in the range. null = first pass / no active loop (run all nodes once).
+        let activeLoopId: string | null = null
+
+        // End-of-body handler for While containers. Called after each pre-phase node;
+        // when the index is a loop's last body node, it either jumps back (auto N× or
+        // Retry) or pauses for Continue/Retry. Returns the index to resume at,
+        // 'cancel', or undefined to continue normally.
+        const bumpWhileProgress = (whileId: string): void => set((s) => {
+          const prev = s.whileProgress[whileId]
+          return { whileProgress: { ...s.whileProgress, [whileId]: { current: (prev?.current ?? 1) + 1, total: prev?.total ?? null } } }
+        }
+        )
+
+        const handleLoopEnd = async (idx: number): Promise<number | 'cancel' | undefined> => {
+          const loop = loops.find((l) => l.lastIdx === idx)
+          if (!loop) return undefined
+          const remaining = loopCounters.get(loop.whileId)
+          // Auto mode with iterations left → loop back automatically.
+          if (remaining != null && remaining > 1) {
+            loopCounters.set(loop.whileId, remaining - 1)
+            bumpWhileProgress(loop.whileId)
+            setRunState((s) => ({ ...s, blockStep: `Looping… ${remaining - 1} left` }))
+            activeLoopId = loop.whileId
+            return loop.firstIdx
+          }
+          // Otherwise the auto counter is exhausted (or it's manual mode): pause on
+          // the While and wait for Continue (proceed) or Retry (run the body again).
+          // runningBranchId blocks Wait branches while the pre-phase is parked here.
+          _retry.current = false
+          set({ activeNodeId: loop.whileId, runningBranchId: loop.whileId })
+          setRunState((s) => ({ ...s, status: 'paused', blockStep: 'Loop finished — Continue or Retry' }))
+          await new Promise<void>((resolve) => { _resume.current = resolve })
+          if (_cancel.current) return 'cancel'
+          set({ runningBranchId: null })
+          setRunState((s) => ({ ...s, status: 'running' }))
+          if (_retry.current) {
+            _retry.current = false
+            bumpWhileProgress(loop.whileId)
+            activeLoopId = loop.whileId
+            return loop.firstIdx
+          }
+          activeLoopId = null   // Continue → resume normal forward execution
+          return undefined
+        }
+
         // Pre-phase: nodes that don't belong to any single branch (sources + merges).
+        let stepsDone = 0
         for (let i = 0; i < preExecExtNodes.length; i++) {
           if (_cancel.current) { _ctx.current = null; set({ runState: IDLE, activeNodeId: null }); return }
           const node = preExecExtNodes[i]
+          // During a loop replay, only re-run that While's own body members.
+          if (activeLoopId) {
+            const body = loops.find((l) => l.whileId === activeLoopId)?.bodyIds
+            if (body && !body.has(node.id)) continue
+          }
           set((s) => ({
             activeNodeId: node.id,
-            runState: { ...s.runState, blockIndex: i, blockProgress: 0, blockStep: 'Starting…' },
+            runState: { ...s.runState, blockIndex: stepsDone, blockProgress: 0, blockStep: 'Starting…' },
           }))
           await executeExtensionNode(node, ctx, setRunState)
+          stepsDone++
+
+          const jump = await handleLoopEnd(i)
+          if (jump === 'cancel') { _ctx.current = null; set({ runState: IDLE, activeNodeId: null }); return }
+          if (jump !== undefined) { i = jump - 1 }
         }
 
         if (waitIds.length > 0) {
@@ -604,19 +753,33 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
 
     cancel() {
       _cancel.current = true
+      flushResume()   // unblock a manual While pause so the run can tear down
       if (_activeJobId.current) {
         const apiUrl = useAppStore.getState().apiUrl
         axios.create({ baseURL: apiUrl }).post(`/generate/cancel/${_activeJobId.current}`).catch(() => {})
         _activeJobId.current = null
       }
       _ctx.current = null
-      set({ runState: IDLE, activeNodeId: null, activeWorkflowId: null, nodeImageOutputs: {}, waitStates: {}, runningBranchId: null })
+      set({ runState: IDLE, activeNodeId: null, activeWorkflowId: null, nodeImageOutputs: {}, waitStates: {}, runningBranchId: null, whileProgress: {} })
       useAppStore.getState().setCurrentJob(null)
     },
 
     reset() {
       _ctx.current = null
-      set({ runState: IDLE, activeNodeId: null, activeWorkflowId: null, nodeImageOutputs: {}, waitStates: {}, runningBranchId: null })
+      set({ runState: IDLE, activeNodeId: null, activeWorkflowId: null, nodeImageOutputs: {}, waitStates: {}, runningBranchId: null, whileProgress: {} })
+    },
+
+    continueWhile() {
+      flushResume()
+    },
+
+    retryWhile() {
+      _retry.current = true
+      flushResume()
+    },
+
+    setLiveNodeParams(nodeId, params) {
+      _liveParams.current.set(nodeId, params)
     },
   }
 })
