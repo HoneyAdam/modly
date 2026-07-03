@@ -9,7 +9,7 @@ interface WorkflowsStore {
   load:          () => Promise<void>
   save:          (workflow: Workflow) => Promise<{ success: boolean; error?: string }>
   remove:        (id: string) => Promise<{ success: boolean; error?: string }>
-  importFile:    () => Promise<{ success: boolean; error?: string }>
+  importFile:    () => Promise<{ success: boolean; error?: string; workflow?: Workflow }>
   exportFile:    (workflow: Workflow) => Promise<{ success: boolean; error?: string }>
   setActive:     (id: string | null) => void
 }
@@ -89,7 +89,17 @@ export const useWorkflowsStore = create<WorkflowsStore>((set) => ({
     set({ loading: true })
     try {
       const raw  = await window.electron.workflows.list()
-      const list = (raw as LegacyWorkflow[]).map(migrateWorkflow)
+      // Dedupe by id: two files on disk can share an internal id (e.g. a copied
+      // workflow), which would produce duplicate React keys. Keep the first
+      // (the list arrives sorted by updatedAt desc, so the most recent wins).
+      const seen = new Set<string>()
+      const list: Workflow[] = []
+      for (const entry of raw as LegacyWorkflow[]) {
+        const wf = migrateWorkflow(entry)
+        if (seen.has(wf.id)) continue
+        seen.add(wf.id)
+        list.push(wf)
+      }
       set({ workflows: list, loading: false })
     } catch {
       set({ loading: false })

@@ -42,7 +42,10 @@ export default function ModelsPage(): JSX.Element {
   const reloadExtensions  = useExtensionsStore((s) => s.reload)
   const clearInstall      = useExtensionsStore((s) => s.clearInstallState)
 
-  const allExtensions: AnyExtension[] = [...modelExtensions, ...processExtensions]
+  const allExtensions: AnyExtension[] = useMemo(
+    () => [...modelExtensions, ...processExtensions],
+    [modelExtensions, processExtensions],
+  )
 
   // Model weight state (needed for node install status + uninstall cleanup)
   const [installedVariantIds, setInstalledVariantIds] = useState<string[]>([])
@@ -134,6 +137,7 @@ export default function ModelsPage(): JSX.Element {
       }
     })
     return () => window.electron.model.offProgress()
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- register the progress listener once on mount
   }, [])
 
   useEffect(() => {

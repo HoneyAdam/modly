@@ -16,10 +16,9 @@ import {
 } from '@xyflow/react'
 import { useWorkflowsStore } from '@shared/stores/workflowsStore'
 import { useExtensionsStore } from '@shared/stores/extensionsStore'
-import { useNavStore } from '@shared/stores/navStore'
 import { useAppStore } from '@shared/stores/appStore'
 import type { Workflow, WFNode, WFEdge, WFNodeData } from '@shared/types/electron.d'
-import { buildAllWorkflowExtensions, getWorkflowExtension } from './mockExtensions'
+import { buildAllWorkflowExtensions } from './mockExtensions'
 import type { WorkflowExtension } from './mockExtensions'
 import { useWorkflowRunStore } from './workflowRunStore'
 import { validateWorkflowPreflight } from './preflight'
@@ -64,87 +63,6 @@ function newId(): string { return crypto.randomUUID() }
 function newWorkflow(): Workflow {
   const now = new Date().toISOString()
   return { id: newId(), name: 'New Workflow', description: '', nodes: [], edges: [], createdAt: now, updatedAt: now }
-}
-
-function newWorkflowFromTemplate(): Workflow {
-  const now         = new Date().toISOString()
-  const imageNodeId = newId()
-  const outputNodeId = newId()
-  return {
-    id:          newId(),
-    name:        'New Workflow',
-    description: '',
-    nodes: [
-      { id: imageNodeId,  type: 'imageNode',  position: { x: 150, y: 180 }, data: { enabled: true, params: {}, showInGenerate: true } },
-      { id: outputNodeId, type: 'outputNode', position: { x: 500, y: 180 }, data: { enabled: true, params: {} } },
-    ],
-    edges: [
-      { id: newId(), source: imageNodeId, target: outputNodeId, type: 'workflowEdge' },
-    ],
-    createdAt: now,
-    updatedAt: now,
-  }
-}
-
-// ─── New workflow modal ───────────────────────────────────────────────────────
-
-function NewWorkflowModal({ onBlank, onTemplate, onClose }: {
-  onBlank:    () => void
-  onTemplate: () => void
-  onClose:    () => void
-}) {
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-[2px]"
-      onMouseDown={onClose}
-    >
-      <div
-        className="w-80 bg-zinc-900 border border-zinc-700/80 rounded-2xl shadow-2xl overflow-hidden"
-        onMouseDown={(e) => e.stopPropagation()}
-      >
-        <div className="px-5 py-4 border-b border-zinc-800">
-          <h2 className="text-sm font-semibold text-zinc-100">New Workflow</h2>
-          <p className="text-[11px] text-zinc-500 mt-0.5">Choose how to start</p>
-        </div>
-
-        <div className="p-4 grid grid-cols-2 gap-3">
-          {/* Blank */}
-          <button
-            onClick={onBlank}
-            className="flex flex-col items-center gap-3 px-3 py-5 rounded-xl border border-zinc-800 hover:border-zinc-600 hover:bg-zinc-800/40 transition-all"
-          >
-            <div className="w-10 h-10 rounded-xl bg-zinc-800 border border-zinc-700/60 flex items-center justify-center text-zinc-500">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-                <rect x="3" y="3" width="18" height="18" rx="2"/>
-              </svg>
-            </div>
-            <div className="text-center">
-              <p className="text-xs font-semibold text-zinc-200">Blank</p>
-              <p className="text-[10px] text-zinc-500 mt-0.5 leading-relaxed">Empty canvas</p>
-            </div>
-          </button>
-
-          {/* Starter template */}
-          <button
-            onClick={onTemplate}
-            className="flex flex-col items-center gap-3 px-3 py-5 rounded-xl border border-zinc-800 hover:border-accent/40 hover:bg-accent/5 transition-all"
-          >
-            <div className="w-10 h-10 rounded-xl bg-accent/10 border border-accent/25 flex items-center justify-center text-accent-light">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-                <rect x="3" y="3" width="6" height="5" rx="1"/>
-                <path d="M9 5.5h6"/>
-                <rect x="15" y="3" width="6" height="5" rx="1"/>
-              </svg>
-            </div>
-            <div className="text-center">
-              <p className="text-xs font-semibold text-zinc-200">Starter</p>
-              <p className="text-[10px] text-zinc-500 mt-0.5 leading-relaxed">Image → Scene</p>
-            </div>
-          </button>
-        </div>
-      </div>
-    </div>
-  )
 }
 
 // ─── Extensions panel ────────────────────────────────────────────────────────
@@ -195,7 +113,7 @@ function ExtensionsPanel({ allExtensions, open }: { allExtensions: WorkflowExten
     const onMove = (e: MouseEvent) => {
       if (!dragging.current) return
       const delta = startX.current - e.clientX
-      setWidth((w) => Math.min(PANEL_MAX, Math.max(PANEL_MIN, startW.current + delta)))
+      setWidth(() => Math.min(PANEL_MAX, Math.max(PANEL_MIN, startW.current + delta)))
     }
     const onUp = () => { dragging.current = false; document.body.style.cursor = '' }
     document.addEventListener('mousemove', onMove)
@@ -479,6 +397,7 @@ function NodePalette({
     }
 
     return { groups, totalItems: flatIdx }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- isExpanded only reads `collapsed`, already a dep
   }, [q, allExtensions, nonBuiltinMap, collapsed])
 
   useEffect(() => { setActiveIndex(0) }, [query])
@@ -781,7 +700,7 @@ function WorkflowCanvasInner({
   onNew:            () => void
   onImport:         () => void
 }) {
-  const { screenToFlowPosition, updateNodeData, getNode } = useReactFlow()
+  const { screenToFlowPosition, getNode } = useReactFlow()
   const { runState, run: runWorkflow, cancel } = useWorkflowRunStore()
   const currentMeshUrl = useAppStore((s) => s.currentJob?.outputUrl)
   const showToast = useAppStore((s) => s.showToast)
@@ -818,6 +737,7 @@ function WorkflowCanvasInner({
     histIdxRef.current = 0
     setHistIdx(0)
     skipPushRef.current = true
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- re-sync only when the workflow switches; adding name/nodes/edges would reset the editor on every keystroke
   }, [workflow.id])
 
   // Auto-save + history push debounced
@@ -845,6 +765,7 @@ function WorkflowCanvasInner({
       skipPushRef.current = false
     }, 500)
     return () => { if (saveTimer.current) clearTimeout(saveTimer.current) }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- debounce on editable state; latest workflow/onSave read in the timeout
   }, [nodes, edges, name])
 
   const preflightIssues = useMemo(() => {
@@ -902,7 +823,7 @@ function WorkflowCanvasInner({
   const canUndo = histIdx > 0
   const canRedo = histIdx < historyRef.current.length - 1
 
-  const isValidConnection = useCallback((connection: Connection) => {
+  const isValidConnection = useCallback((connection: Edge | Connection) => {
     const srcType = getNodeOutputType(getNode(connection.source) as Node, allExtensions)
     const tgtType = getNodeInputType(getNode(connection.target) as Node, connection.targetHandle, allExtensions)
     if (srcType && tgtType && srcType !== tgtType) return false  // type mismatch (unknown types allowed)
@@ -922,7 +843,7 @@ function WorkflowCanvasInner({
     return true
   }, [getNode, allExtensions, edges])
 
-  const onConnectStart = useCallback((_: React.MouseEvent | React.TouchEvent, params: OnConnectStartParams) => {
+  const onConnectStart = useCallback((_: MouseEvent | TouchEvent, params: OnConnectStartParams) => {
     pendingConnectionRef.current  = params
     connectionCompletedRef.current = false
   }, [])
@@ -1252,6 +1173,7 @@ export default function WorkflowsPage(): JSX.Element {
     [modelExtensions, processExtensions],
   )
 
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- load once on mount
   useEffect(() => { load(); loadExtensions() }, [])
 
   // Auto-select first workflow when none is active or the active id no longer exists
@@ -1260,6 +1182,7 @@ export default function WorkflowsPage(): JSX.Element {
     if (workflows.length === 0) return
     if (activeId && workflows.find((w) => w.id === activeId)) return
     setActive(workflows[0].id)
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- setActive is a stable store setter
   }, [workflows, loading, activeId])
 
   const activeWorkflow = workflows.find((w) => w.id === activeId) ?? null

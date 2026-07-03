@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-require-imports */
 import path = require('path')
 
 interface ProcessInput  { filePath?: string; text?: string }

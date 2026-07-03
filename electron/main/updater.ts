@@ -5,7 +5,6 @@ import { logger } from './logger'
 type WindowGetter = () => BrowserWindow | null
 
 export function initAutoUpdater(getWindow: WindowGetter): void {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   autoUpdater.logger = logger as any
   autoUpdater.autoDownload = false
   autoUpdater.autoInstallOnAppQuit = true
