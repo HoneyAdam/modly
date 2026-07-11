@@ -2,7 +2,7 @@ import type { Workflow, WFNode } from '@shared/types/electron.d'
 import { getWorkflowExtension, type WorkflowExtension } from './mockExtensions'
 import { isPassthrough, isBranchConsumer, resolveDataSource, nearestUpstreamWaits } from './nodeBehaviors'
 
-type DataType = 'image' | 'text' | 'mesh'
+type DataType = 'image' | 'text' | 'mesh' | 'audio'
 
 export interface WorkflowPreflightIssue {
   key: string
@@ -25,6 +25,7 @@ function nodeLabel(node: WFNode, allExtensions: WorkflowExtension[]): string {
 function formatType(type: DataType): string {
   if (type === 'mesh') return 'mesh'
   if (type === 'image') return 'image'
+  if (type === 'audio') return 'audio'
   return 'text'
 }
 
