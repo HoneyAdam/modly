@@ -23,6 +23,7 @@ import { spawn, execFile } from 'child_process'
 import { assertSafeExtensionId, buildExtensionBackupPath, resolveExtensionPathWithinRoot } from './extension-path-guard'
 import { isSetupFailureFatal, validateInstallManifest } from './extension-install-utils'
 import { registerWorkspaceAssetLibraryIpcHandlers } from './artifact-registry-service'
+import { updatesSupported } from './updater'
 
 type WindowGetter = () => BrowserWindow | null
 const pExecFile = promisify(execFile)
@@ -1237,7 +1238,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
 
   // Auto-updater
   ipcMain.handle('updater:check', async () => {
-    if (!app.isPackaged) return { success: false }
+    if (!app.isPackaged || !updatesSupported) return { success: false }
     try {
       await autoUpdater.checkForUpdates()
       return { success: true }
@@ -1248,6 +1249,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
   })
 
   ipcMain.handle('updater:quitAndInstall', () => {
+    if (!updatesSupported) return
     app.removeAllListeners('window-all-closed')
     BrowserWindow.getAllWindows().forEach(w => w.destroy())
     autoUpdater.quitAndInstall(true, true)
