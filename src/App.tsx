@@ -6,7 +6,7 @@ import { UpdateModal } from '@shared/components/ui/UpdateModal'
 import { ErrorModal } from '@shared/components/ui/ErrorModal'
 import { Toast } from '@shared/components/ui/Toast'
 
-const UI_SCALE_FACTORS: Record<UiScale, number> = { small: 0.875, medium: 1, large: 1.25 }
+const UI_SCALE_FACTORS: Record<UiScale, number> = { small: 0.875, medium: 1, large: 1.25, 'very-large': 1.5 }
 
 export default function App(): JSX.Element {
   const { checkSetup, setupStatus, initApp, backendStatus, showError, useAtkinsonFont, uiScale } = useAppStore()
