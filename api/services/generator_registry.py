@@ -70,7 +70,15 @@ def _discover_extensions() -> Dict[str, Tuple[type, dict]]:
             continue
 
         try:
-            manifest   = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+            # Process extensions run via Electron's process runner, not this
+            # registry — skip them even when their entry file is generator.py.
+            if manifest.get("type", "model") != "model":
+                print(f"[Registry] Skipping '{ext_dir.name}': type "
+                      f"'{manifest.get('type')}' is not handled by this registry")
+                continue
+
             ext_id     = manifest["id"]
             class_name = manifest["generator_class"]
 
