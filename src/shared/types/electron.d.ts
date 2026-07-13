@@ -16,6 +16,7 @@ export interface ExtensionNode {
   name:             string
   input:            'image' | 'text' | 'mesh' | 'audio'
   inputs?:          ('image' | 'text' | 'mesh' | 'audio')[]   // multi-input nodes; overrides input when set
+  inputLabels?:     string[]   // display labels per input slot (e.g. positive/negative)
   output:           'image' | 'text' | 'mesh' | 'audio'
   paramsSchema:     ParamSchema[]
   paramDefaults?:   Record<string, number | string>
@@ -42,7 +43,7 @@ export interface ModelExtension {
 export interface ParamSchema {
   id:       string
   label:    string
-  type:     'select' | 'int' | 'float' | 'string'
+  type:     'select' | 'int' | 'float' | 'string' | 'file-select'
   default:  number | string
   options?: { value: number | string; label: string }[]
   min?:     number
@@ -50,6 +51,9 @@ export interface ParamSchema {
   step?:    number
   tooltip?: string
   show_if?: Record<string, string | number | (string | number)[]>
+  // file-select: dropdown of the files inside the folder held by another param
+  dir_from?:   string     // id of the (string) param holding the folder path
+  extensions?: string[]   // file extensions to list (e.g. ["json"])
 }
 
 export interface ProcessExtension {
@@ -74,6 +78,8 @@ export type AnyExtension = ModelExtension | ProcessExtension
 export interface ProcessInput {
   filePath?: string
   text?:     string
+  /** Per-slot texts for multi-text-input nodes (index = target handle slot). */
+  texts?:    (string | undefined)[]
   nodeId?:   string
 }
 
@@ -157,6 +163,7 @@ declare global {
         selectDirectory: (defaultPath?: string) => Promise<string | null>
         savePath:        (args: { filters: { name: string; extensions: string[] }[]; defaultPath?: string }) => Promise<string | null>
         listDir:         (dirPath: string) => Promise<string[]>
+        listFiles:       (dirPath: string, extensions?: string[]) => Promise<string[]>
         moveDirectory:   (args: { src: string; dest: string }) => Promise<{ success: boolean; error?: string }>
         deleteDirectory: (dirPath: string) => Promise<{ success: boolean; error?: string }>
         readScreenshotDataUrl: (filename: string) => Promise<string>

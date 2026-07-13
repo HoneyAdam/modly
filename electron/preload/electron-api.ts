@@ -70,6 +70,8 @@ export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFra
         ipcRenderer.invoke('fs:savePath', args) as Promise<string | null>,
       listDir:           (dirPath: string): Promise<string[]> =>
         ipcRenderer.invoke('fs:listDir', dirPath) as Promise<string[]>,
+      listFiles:         (dirPath: string, extensions?: string[]): Promise<string[]> =>
+        ipcRenderer.invoke('fs:listFiles', dirPath, extensions) as Promise<string[]>,
       moveDirectory:     (args: { src: string; dest: string }): Promise<{ success: boolean; error?: string }> =>
         ipcRenderer.invoke('fs:moveDirectory', args) as Promise<{ success: boolean; error?: string }>,
       deleteDirectory:   (dirPath: string): Promise<{ success: boolean; error?: string }> =>
@@ -221,7 +223,7 @@ export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFra
 
       runProcess: (
         extensionId: string,
-        input:       { filePath?: string; text?: string; nodeId?: string },
+        input:       { filePath?: string; text?: string; texts?: (string | undefined)[]; nodeId?: string },
         params:      Record<string, unknown>,
       ): Promise<{ success: boolean; result?: { filePath?: string; text?: string }; error?: string }> =>
         ipcRenderer.invoke('extensions:runProcess', extensionId, input, params) as Promise<{ success: boolean; result?: { filePath?: string; text?: string }; error?: string }>,
