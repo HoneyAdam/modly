@@ -241,7 +241,7 @@ async function executeExtensionNode(
 
     let blob: Blob
     let fname: string
-    if (isTextInput || (!activeImagePath && selectedImageData)) {
+    if (isTextInput || (selectedImageData && nodeInputPath === undefined)) {
       const base64 = selectedImageData && nodeInputPath === undefined
         ? selectedImageData
         : 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==' // 1x1 transparent PNG
