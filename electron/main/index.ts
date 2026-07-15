@@ -10,6 +10,12 @@ import { syncBuiltinExtensions } from './builtin-sync'
 let mainWindow: BrowserWindow | null = null
 let pythonBridge: PythonBridge | null = null
 
+// When the launching terminal closes, stdout/stderr become broken pipes and
+// every console.* write emits an unhandled 'error' (EPIPE) that would loop
+// through the uncaughtException handler forever. Swallow stream errors.
+process.stdout?.on('error', () => {})
+process.stderr?.on('error', () => {})
+
 function createWindow(): void {
   mainWindow = new BrowserWindow({
     width: 1280,
@@ -64,6 +70,7 @@ function createWindow(): void {
 app.setName('Modly')
 
 process.on('uncaughtException', (err) => {
+  if ((err as NodeJS.ErrnoException).code === 'EPIPE') return
   logger.error(`Uncaught exception: ${err.stack ?? err.message}`)
   mainWindow?.webContents.send('app:error', err.stack ?? err.message)
 })
