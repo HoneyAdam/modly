@@ -789,6 +789,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       name?:             string
       input?:            'mesh' | 'image' | 'text' | 'audio'
       inputs?:           ('mesh' | 'image' | 'text' | 'audio')[]
+      input_labels?:     string[]
       output?:           'mesh' | 'image' | 'text' | 'audio'
       params_schema?:    unknown[]
       param_defaults?:   Record<string, unknown>
@@ -816,6 +817,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       name:           n.name ?? n.id,
       input:          n.input  ?? 'image' as const,
       inputs:         n.inputs,
+      inputLabels:    n.input_labels,
       output:         n.output ?? 'mesh'  as const,
       paramsSchema:   n.params_schema ?? parsed.params_schema ?? [],
       paramDefaults:  { ...(parsed.param_defaults ?? {}), ...(n.param_defaults ?? {}) },
@@ -1230,7 +1232,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
   })
 
   // Run a process extension in an isolated worker thread
-  ipcMain.handle('extensions:runProcess', async (_, extensionId: string, input: { filePath?: string; text?: string; nodeId?: string }, params: Record<string, unknown>) => {
+  ipcMain.handle('extensions:runProcess', async (_, extensionId: string, input: { filePath?: string; text?: string; texts?: (string | undefined)[]; nodeId?: string }, params: Record<string, unknown>) => {
     const userData        = app.getPath('userData')
     const { extensionsDir, workspaceDir } = getSettings(userData)
 

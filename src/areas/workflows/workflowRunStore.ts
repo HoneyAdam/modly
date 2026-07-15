@@ -308,6 +308,9 @@ async function executeExtensionNode(
   let nodeInputPath:     string | undefined
   let nodeInputText:     string | undefined
   let nodeInputMeshPath: string | undefined
+  // Per-slot texts for multi-text-input nodes (e.g. positive/negative prompts).
+  // Indexed by target handle: input-0 → texts[0], input-1 → texts[1].
+  const nodeInputTexts: (string | undefined)[] = []
 
   const incomingEdges = workflow.edges.filter((e) => e.target === node.id)
 
@@ -318,7 +321,11 @@ async function executeExtensionNode(
       if (src.outputType === 'mesh')        nodeInputMeshPath = src.filePath
       else if (src.outputType === 'image')  nodeInputPath     = src.filePath
       else if (src.filePath !== undefined)  nodeInputPath     = src.filePath
-      if (src.text !== undefined && src.text.trim().length > 0) nodeInputText = src.text
+      if (src.text !== undefined && src.text.trim().length > 0) {
+        nodeInputText = src.text
+        const slot = /^input-(\d+)$/.exec(edge.targetHandle ?? '')
+        if (slot) nodeInputTexts[Number(slot[1])] = src.text
+      }
     }
   } else {
     for (const edge of incomingEdges) {
@@ -421,7 +428,12 @@ async function executeExtensionNode(
     const nid    = parts[1] ?? ''
     const result = await window.electron.extensions.runProcess(
       extId,
-      { filePath: nodeInputPath, text: nodeInputText, nodeId: nid },
+      {
+        filePath: nodeInputPath,
+        text:     nodeInputText,
+        texts:    nodeInputTexts.length > 0 ? nodeInputTexts : undefined,
+        nodeId:   nid,
+      },
       liveParams as Record<string, unknown>,
     )
     if (!result.success) throw new Error(result.error ?? 'Process extension failed')
