@@ -697,6 +697,18 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     }
   })
 
+  // Text-file picker for the standalone Load Prompt node.
+  ipcMain.handle('fs:selectTextFile', async () => {
+    const win = getWindow()
+    if (!win) return null
+    const result = await dialog.showOpenDialog(win, {
+      title: 'Select a prompt text file',
+      filters: [{ name: 'Text', extensions: ['txt', 'md', 'prompt'] }],
+      properties: ['openFile'],
+    })
+    return result.canceled ? null : result.filePaths[0]
+  })
+
   ipcMain.handle('fs:moveDirectory', async (_, { src, dest }: { src: string; dest: string }) => {
     try {
       await mkdir(dest, { recursive: true })
