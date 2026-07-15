@@ -238,6 +238,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     win.isMaximized() ? win.restore() : win.maximize()
   })
   ipcMain.on('window:close', () => getWindow()?.close())
+  ipcMain.handle('window:isMaximized', () => getWindow()?.isMaximized() ?? false)
 
   // Setup handlers — skipped in dev (uses .venv instead of python-embed)
   ipcMain.handle('setup:check', async () => {

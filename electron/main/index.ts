@@ -39,6 +39,11 @@ function createWindow(): void {
     mainWindow?.show()
   })
 
+  // Keep the renderer's maximize/restore icon in sync — covers the toolbar
+  // button, double-clicking the title bar, and OS window-snap gestures.
+  mainWindow.on('maximize',   () => mainWindow?.webContents.send('window:maximizeChanged', true))
+  mainWindow.on('unmaximize', () => mainWindow?.webContents.send('window:maximizeChanged', false))
+
   mainWindow.webContents.on('before-input-event', (event, input) => {
     const isMacQuitShortcut =
       process.platform === 'darwin' &&
