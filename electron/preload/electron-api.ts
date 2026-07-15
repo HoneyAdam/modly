@@ -21,9 +21,14 @@ export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFra
   return {
     // Window controls
     window: {
-      minimize: () => ipcRenderer.send('window:minimize'),
-      maximize: () => ipcRenderer.send('window:maximize'),
-      close:    () => ipcRenderer.send('window:close'),
+      minimize:     () => ipcRenderer.send('window:minimize'),
+      maximize:     () => ipcRenderer.send('window:maximize'),
+      close:        () => ipcRenderer.send('window:close'),
+      isMaximized:  () => ipcRenderer.invoke('window:isMaximized') as Promise<boolean>,
+      onMaximizeChange: (cb: (isMaximized: boolean) => void) => {
+        ipcRenderer.on('window:maximizeChanged', (_event, isMaximized) => cb(isMaximized as boolean))
+      },
+      offMaximizeChange: () => ipcRenderer.removeAllListeners('window:maximizeChanged'),
     },
 
     // Renderer UI (zoom whole page — scales every px/rem consistently)

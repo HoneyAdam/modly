@@ -25,7 +25,10 @@ const TAG_CLS: Record<string, string> = {
 
 // ─── Param control ────────────────────────────────────────────────────────────
 
-const inputCls = 'w-full bg-zinc-800 border border-zinc-700 rounded-lg px-2 py-1 text-[11px] text-zinc-200 focus:outline-none focus:border-accent/60'
+// nodrag — without it, React Flow starts dragging the node on mousedown inside
+// these fields, so click-drag text selection (or opening a <select>) moves the
+// node instead.
+const inputCls = 'nodrag w-full bg-zinc-800 border border-zinc-700 rounded-lg px-2 py-1 text-[11px] text-zinc-200 focus:outline-none focus:border-accent/60'
 
 function IntInput({ value, onChange, className }: { value: number; onChange: (v: number) => void; className: string }) {
   const [text, setText] = useState(String(value))

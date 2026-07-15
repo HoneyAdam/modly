@@ -118,6 +118,10 @@ export interface Workflow {
   id:          string
   name:        string
   description: string
+  /** Display folder in the workflow browser (no folder = root) */
+  folder?:     string
+  /** Pinned in the workflow browser's Bookmarks section */
+  bookmarked?: boolean
   nodes:       WFNode[]
   edges:       WFEdge[]
   createdAt:   string
@@ -134,9 +138,12 @@ declare global {
         memory: () => Promise<{ total: number; used: number; available: number }>
       }
       window: {
-        minimize: () => void
-        maximize: () => void
-        close:    () => void
+        minimize:          () => void
+        maximize:          () => void
+        close:             () => void
+        isMaximized:       () => Promise<boolean>
+        onMaximizeChange:  (cb: (isMaximized: boolean) => void) => void
+        offMaximizeChange: () => void
       }
       ui: {
         setZoomFactor: (factor: number) => void
