@@ -30,13 +30,19 @@ import Load3DMeshNode   from './nodes/Load3DMeshNode'
 import PreviewImageNode from './nodes/PreviewImageNode'
 import WaitNode         from './nodes/WaitNode'
 import WhileNode        from './nodes/WhileNode'
+import ForEachNode      from './nodes/ForEachNode'
 import WorkflowEdge     from './nodes/WorkflowEdge'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const DRAG_KEY      = 'modly/extension-id'
 const DRAG_NODE_KEY = 'modly/node-type'
-const NODE_TYPES = { extensionNode: ExtensionNode, imageNode: ImageNode, textNode: TextNode, outputNode: AddToSceneNode, meshNode: Load3DMeshNode, previewNode: PreviewImageNode, waitNode: WaitNode, whileNode: WhileNode }
+const NODE_TYPES = { extensionNode: ExtensionNode, imageNode: ImageNode, textNode: TextNode, outputNode: AddToSceneNode, meshNode: Load3DMeshNode, previewNode: PreviewImageNode, waitNode: WaitNode, whileNode: WhileNode, forEachNode: ForEachNode }
+
+// Loop-container node types: resizable frames whose children form a loop body.
+// (For Each iterators are plain source nodes, not containers.)
+const CONTAINER_TYPES = new Set(['whileNode'])
+const isContainerType = (type: string | undefined): boolean => !!type && CONTAINER_TYPES.has(type)
 const EDGE_TYPES = { workflowEdge: WorkflowEdge }
 
 const DEFAULT_EDGE_OPTS = { type: 'workflowEdge' }
@@ -45,7 +51,7 @@ const DEFAULT_EDGE_OPTS = { type: 'workflowEdge' }
 // auto-parent nodes dropped (or created) inside a While so they join its loop body.
 function findWhileContainerAt(nodes: Node[], pos: { x: number; y: number }): Node | undefined {
   return nodes.find((n) => {
-    if (n.type !== 'whileNode') return false
+    if (!isContainerType(n.type)) return false
     const gw = (n.measured?.width  ?? n.width  ?? (n.style?.width  as number)) || 0
     const gh = (n.measured?.height ?? n.height ?? (n.style?.height as number)) || 0
     return pos.x >= n.position.x && pos.x <= n.position.x + gw
@@ -92,6 +98,7 @@ const PANEL_BUILTIN_NODES = [
   { type: 'previewNode', label: 'Preview Views',  color: '#38bdf8', icon: <><rect x="3" y="3" width="8" height="8" rx="1"/><rect x="13" y="3" width="8" height="8" rx="1"/><rect x="3" y="13" width="8" height="8" rx="1"/><rect x="13" y="13" width="8" height="8" rx="1"/></> },
   { type: 'waitNode',    label: 'Wait',           color: '#71717a', icon: <><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></> },
   { type: 'whileNode',   label: 'While',          color: '#f59e0b', icon: <><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></> },
+  { type: 'forEachNode', label: 'For Each', color: '#38bdf8', icon: <><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></> },
 ]
 
 function ExtGroupHeader({ title, author, expanded, onToggle, count }: { title: string; author?: string; expanded: boolean; onToggle: () => void; count: number }) {
@@ -337,6 +344,7 @@ const BUILTIN_NODES = [
   { type: 'previewNode', label: 'Preview Views',  color: '#38bdf8', description: 'Displays multi-view image outputs in a 2×3 grid' },
   { type: 'waitNode',    label: 'Wait',           color: '#71717a', description: 'Pauses the workflow until you click Continue' },
   { type: 'whileNode',   label: 'While',          color: '#f59e0b', description: 'Container: wrap nodes to loop them N times or with Continue/Retry' },
+  { type: 'forEachNode', label: 'For Each', color: '#38bdf8', description: 'Iterates a folder (image / text / mesh) alphabetically, one item per run of the downstream nodes' },
 ]
 
 type PaletteItem =
@@ -879,8 +887,8 @@ function WorkflowCanvasInner({
     // bail only on a real node or a handle.
     const target = event.target as Element
     const nodeEl = target.closest('.react-flow__node')
-    const onWhile = nodeEl?.classList.contains('react-flow__node-whileNode') ?? false
-    if (target.closest('.react-flow__handle') || (nodeEl && !onWhile)) {
+    const onContainer = !!nodeEl && [...CONTAINER_TYPES].some((t) => nodeEl.classList.contains(`react-flow__node-${t}`))
+    if (target.closest('.react-flow__handle') || (nodeEl && !onContainer)) {
       pendingConnectionRef.current = null
       return
     }
@@ -900,7 +908,7 @@ function WorkflowCanvasInner({
 
     const nodeType = e.dataTransfer.getData(DRAG_NODE_KEY)
     if (nodeType) {
-      const isContainer = nodeType === 'whileNode'
+      const isContainer = isContainerType(nodeType)
       setNodes((nds) => {
         const parent = isContainer ? undefined : findWhileContainerAt(nds, position)
         const node: Node = {
@@ -959,7 +967,7 @@ function WorkflowCanvasInner({
       pendingDropPos ?? { x: window.innerWidth / 2, y: window.innerHeight / 2 }
     )
     const newNodeId = newId()
-    const isContainer = type === 'whileNode'
+    const isContainer = isContainerType(type)
     setNodes((nds) => {
       const parent = isContainer ? undefined : findWhileContainerAt(nds, position)
       const node: Node = {
@@ -1001,7 +1009,7 @@ function WorkflowCanvasInner({
   // When a While container is deleted (button or keyboard), detach its children
   // to absolute coordinates so they don't get orphaned to the canvas origin.
   const onNodesDelete = useCallback((deleted: Node[]) => {
-    const removedContainers = deleted.filter((n) => n.type === 'whileNode')
+    const removedContainers = deleted.filter((n) => isContainerType(n.type))
     if (removedContainers.length === 0) return
     setNodes((nds) => nds.map((n) => {
       const container = removedContainers.find((c) => c.id === n.parentId)
@@ -1014,9 +1022,9 @@ function WorkflowCanvasInner({
   // When a node is dropped, attach/detach it to a While container based on overlap.
   // Children get a parentId + parent-relative position (no extent, so they can be dragged back out).
   const onNodeDragStop = useCallback((_e: unknown, dragged: Node) => {
-    if (dragged.type === 'whileNode') return
+    if (isContainerType(dragged.type)) return
     setNodes((nds) => {
-      const containers = nds.filter((n) => n.type === 'whileNode')
+      const containers = nds.filter((n) => isContainerType(n.type))
       if (containers.length === 0 && !dragged.parentId) return nds
 
       const parent = dragged.parentId ? nds.find((n) => n.id === dragged.parentId) : undefined
@@ -1036,7 +1044,7 @@ function WorkflowCanvasInner({
       const newParentId = container?.id
       if (newParentId === dragged.parentId) return nds   // no change
 
-      let next: Node[] = nds.map((n) => {
+      const next: Node[] = nds.map((n) => {
         if (n.id !== dragged.id) return n
         if (container) {
           // parentId (no extent) → child moves with the container but can still be dragged out

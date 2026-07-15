@@ -157,6 +157,8 @@ declare global {
         selectDirectory: (defaultPath?: string) => Promise<string | null>
         savePath:        (args: { filters: { name: string; extensions: string[] }[]; defaultPath?: string }) => Promise<string | null>
         listDir:         (dirPath: string) => Promise<string[]>
+        listFiles:       (dirPath: string, extensions?: string[]) => Promise<string[]>
+        selectTextFile:  () => Promise<string | null>
         moveDirectory:   (args: { src: string; dest: string }) => Promise<{ success: boolean; error?: string }>
         deleteDirectory: (dirPath: string) => Promise<{ success: boolean; error?: string }>
         readScreenshotDataUrl: (filename: string) => Promise<string>

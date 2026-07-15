@@ -677,6 +677,38 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     }
   })
 
+  // List files (not directories) in a folder, optionally filtered by extension.
+  // `extensions` are lowercase without the dot (e.g. ['txt', 'png']).
+  ipcMain.handle('fs:listFiles', async (_, dirPath: string, extensions?: string[]) => {
+    try {
+      const wanted = extensions?.map(e => e.toLowerCase().replace(/^\./, ''))
+      const entries = await readdir(dirPath, { withFileTypes: true })
+      return entries
+        .filter(e => e.isFile())
+        .map(e => e.name)
+        .filter(name => {
+          if (!wanted || wanted.length === 0) return true
+          const ext = name.split('.').pop()?.toLowerCase() ?? ''
+          return wanted.includes(ext)
+        })
+        .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
+    } catch {
+      return []
+    }
+  })
+
+  // Text-file picker for the standalone Load Prompt node.
+  ipcMain.handle('fs:selectTextFile', async () => {
+    const win = getWindow()
+    if (!win) return null
+    const result = await dialog.showOpenDialog(win, {
+      title: 'Select a prompt text file',
+      filters: [{ name: 'Text', extensions: ['txt', 'md', 'prompt'] }],
+      properties: ['openFile'],
+    })
+    return result.canceled ? null : result.filePaths[0]
+  })
+
   ipcMain.handle('fs:moveDirectory', async (_, { src, dest }: { src: string; dest: string }) => {
     try {
       await mkdir(dest, { recursive: true })

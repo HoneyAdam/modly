@@ -70,6 +70,10 @@ export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFra
         ipcRenderer.invoke('fs:savePath', args) as Promise<string | null>,
       listDir:           (dirPath: string): Promise<string[]> =>
         ipcRenderer.invoke('fs:listDir', dirPath) as Promise<string[]>,
+      listFiles:         (dirPath: string, extensions?: string[]): Promise<string[]> =>
+        ipcRenderer.invoke('fs:listFiles', dirPath, extensions) as Promise<string[]>,
+      selectTextFile:    (): Promise<string | null> =>
+        ipcRenderer.invoke('fs:selectTextFile') as Promise<string | null>,
       moveDirectory:     (args: { src: string; dest: string }): Promise<{ success: boolean; error?: string }> =>
         ipcRenderer.invoke('fs:moveDirectory', args) as Promise<{ success: boolean; error?: string }>,
       deleteDirectory:   (dirPath: string): Promise<{ success: boolean; error?: string }> =>
