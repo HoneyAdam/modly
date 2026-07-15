@@ -38,6 +38,10 @@ export interface ModelExtension {
   source?:      string
   localPath?:   string
   nodes:        ExtensionNode[]
+  /** Folder exists but is not a loadable extension — see manifestError */
+  corrupted?:   boolean
+  /** Why the folder is corrupted: manifest gone, manifest unparseable, or install never completed */
+  manifestError?: 'missing' | 'invalid' | 'incomplete'
 }
 
 export interface ParamSchema {
@@ -69,6 +73,10 @@ export interface ProcessExtension {
   localPath?:   string
   entry:        string
   nodes:        ExtensionNode[]
+  /** Folder exists but is not a loadable extension — see manifestError */
+  corrupted?:   boolean
+  /** Why the folder is corrupted: manifest gone, manifest unparseable, or install never completed */
+  manifestError?: 'missing' | 'invalid' | 'incomplete'
 }
 
 export type AnyExtension = ModelExtension | ProcessExtension
