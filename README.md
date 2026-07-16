@@ -28,7 +28,7 @@ Alternatively, you can clone the repository and run the app directly without ins
 launch.bat
 
 # Linux / macOS
-./launcher.sh
+./launch.sh
 ```
 
 ---
@@ -107,6 +107,10 @@ Modly supports external model and process extensions. Each extension is a GitHub
 ![Install models](docs/install-models.png)
 
 ---
+
+## Workflows
+Start with a basic workflow first. For example, on the "Workflows" tab, try: Image -> Generate Mesh -> Add to Scene. Make sure there is a connection between each of the steps. Go to the "Generate" tab, make sure the workflow is selected, then click on "Generate 3D Model". Click on "Settings/Logs/Errors" to see any issues.
+
 
 ## Modly CLI
 
